@@ -45,6 +45,8 @@ class AudioTrack:
     file_path: str = ""
     color: str = ""
     processing: bool = False
+    grain_source_indices: List[int] = None  # Índices originais dos grãos
+    grain_track_id: int = 0  # ID do track (0 para áudio 1, 1 para áudio 2)
     
     def __post_init__(self):
         if self.grains is None:
@@ -61,6 +63,9 @@ class AudioTrack:
             self.grain_phases = []
         if self.dynamic_profile is None:
             self.dynamic_profile = np.array([])
+        if self.grain_source_indices is None:
+            self.grain_source_indices = []
+        self.grain_track_id = 0 if "1" in self.name else 1
 
 class GrainProcessor:
     """Processador de grãos de áudio"""
@@ -255,6 +260,51 @@ class GrainProcessor:
         
         return synthesized
     
+    def create_connection_grain_glissando(self, freq1: np.ndarray, mag1: np.ndarray, phase1: np.ndarray,
+                                    freq2: np.ndarray, mag2: np.ndarray, phase2: np.ndarray,
+                                    connection_duration_ms: int, sample_rate: int) -> np.ndarray:
+        """Cria grão de conexão com glissandi entre parciais correspondentes por amplitude - SEM ENVELOPE"""
+        grain_samples = int(connection_duration_ms * sample_rate / 1000)
+        t = np.linspace(0, connection_duration_ms / 1000, grain_samples, endpoint=False)
+
+        # Limita ao número de parciais disponíveis
+        num_partials = min(len(freq1), len(freq2), self.num_partials)
+
+        synthesized = np.zeros(grain_samples)
+
+        # Para cada parcial, cria um glissando da frequência do grão 1 para a do grão 2
+        for i in range(num_partials):
+            # Frequências inicial e final
+            f_start = freq1[i] if i < len(freq1) else 0
+            f_end = freq2[i] if i < len(freq2) else 0
+
+            # Magnitudes (usa a média das magnitudes)
+            mag_start = mag1[i] if i < len(mag1) else 0
+            mag_end = mag2[i] if i < len(mag2) else 0
+            mag = (mag_start + mag_end) / 2
+
+            # Fases (interpola linearmente)
+            p_start = phase1[i] if i < len(phase1) else 0
+            p_end = phase2[i] if i < len(phase2) else 0
+
+            # Verifica se as frequências são válidas
+            if f_start > 20 and f_end > 20 and f_start < sample_rate/2 and f_end < sample_rate/2 and mag > 0.001:
+                # Glissando linear de frequência
+                freq_t = f_start + (f_end - f_start) * (t / (connection_duration_ms / 1000))
+
+                # Interpolação de fase
+                phase_t = p_start + (p_end - p_start) * (t / (connection_duration_ms / 1000))
+
+                # Adiciona o parcial com glissando
+                synthesized += mag * np.sin(2 * np.pi * freq_t * t + phase_t)
+
+        # NORMALIZAÇÃO SIMPLES (sem envelope)
+        max_val = np.max(np.abs(synthesized))
+        if max_val > 0:
+            synthesized = synthesized / max_val * 0.8  # Ganho ligeiramente reduzido
+
+        return synthesized
+    
     def reconstruct_audio_with_dynamics(self, grains: List[np.ndarray], 
                                       envelopes: List[np.ndarray],
                                       hop_size: int,
@@ -308,11 +358,11 @@ class AudioInterpolatorApp:
             AudioTrack(name="Áudio 2", color="#ff6b6b")
         ]
 
-        # Inicializa referências aos botões (importante!)
+        # Inicializa referências aos botões
         for track in self.audio_tracks:
-            track.save_btn = None           # Botão salvar
-            track.play_orig_btn = None      # Botão play original
-            track.play_synth_btn = None     # Botão play sintetizado
+            track.save_btn = None
+            track.play_orig_btn = None
+            track.play_synth_btn = None
 
         self.grain_processor = GrainProcessor(NUM_PARTIALS)
         
@@ -328,19 +378,19 @@ class AudioInterpolatorApp:
         self.interpolation_mode = self.interpolation_modes[0]
         self.interpolation_factor = 50.0  # 0-100%
         self.randomness_factor = 0.0  # 0-100%
-        self.connection_grain_duration = 100  # ms
+        self.connection_grain_duration = 100  # ms (10-5000 ms)
         self.interpolated_audio = None
         self.interpolation_processing = False
-        # Controle de ganho para interpolação
-        self.interpolation_gain_db = 0.0  # dB
+        self.interpolation_gain_db = 0.0
         self.interpolation_gain_linear = 1.0
 
-        # Criar variáveis de controle ANTES de setup_ui
+        # Criar variáveis de controle
         self.grain_var = tk.IntVar(value=self.grain_duration)
         self.overlap_var = tk.DoubleVar(value=self.overlap * 100)
         self.partials_var = tk.IntVar(value=self.num_partials)
         self.interp_var = tk.DoubleVar(value=self.interpolation_factor)
         self.random_var = tk.DoubleVar(value=self.randomness_factor)
+        self.connection_var = tk.IntVar(value=self.connection_grain_duration)
         self.interp_gain_var = tk.DoubleVar(value=self.interpolation_gain_db)
         self.mode_var = tk.StringVar(value=self.interpolation_modes[0])
         self.dynamic_var = tk.BooleanVar(value=self.dynamic_preservation)
@@ -385,7 +435,6 @@ class AudioInterpolatorApp:
 
     def setup_ui(self):
         """Configura a interface do usuário moderna"""
-        # Configurar estilo
         self.setup_styles()
 
         # Frame principal
@@ -410,10 +459,10 @@ class AudioInterpolatorApp:
         subtitle_label = tk.Label(
             header_frame,
             text="por síntese aditiva",
-            font=('Segoe UI', 10, 'italic'),  # Fonte menor
-            fg=self.colors['fg_light'],       # Cor mais clara/desbotada
+            font=('Segoe UI', 10, 'italic'),
+            fg=self.colors['fg_light'],
             bg=self.colors['bg'],
-            padx=(10,)                      # Espaço entre título e subtítulo
+            padx=(10,)
         )
         subtitle_label.pack(side=tk.LEFT)
 
@@ -435,14 +484,12 @@ class AudioInterpolatorApp:
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
 
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=370)  # LARGURA FIXA
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=370)
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        # Empacota canvas e scrollbar
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Ajusta bindings para scroll com mouse
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
 
@@ -466,7 +513,6 @@ class AudioInterpolatorApp:
             frame = tk.Frame(sliders_grid, bg=self.colors['card_bg'])
             frame.grid(row=row, column=col, sticky="nsew", padx=2, pady=1)
 
-            # Label
             tk.Label(
                 frame,
                 text=text,
@@ -475,7 +521,6 @@ class AudioInterpolatorApp:
                 bg=self.colors['card_bg']
             ).pack(anchor=tk.W)
 
-            # Slider
             slider = ttk.Scale(
                 frame,
                 from_=min_val,
@@ -487,7 +532,6 @@ class AudioInterpolatorApp:
             )
             slider.pack(fill=tk.X, pady=(0, 0))
 
-            # Label de valor
             value_label = tk.Label(
                 frame,
                 text=f"{var.get()}{unit}",
@@ -504,9 +548,8 @@ class AudioInterpolatorApp:
         extra_frame = tk.Frame(config_card, bg=self.colors['card_bg'])
         extra_frame.pack(fill=tk.X, pady=(2, 0))
 
-        # Checkboxes compactos
         checks_frame = tk.Frame(extra_frame, bg=self.colors['card_bg'])
-        checks_frame.pack(expand=True) # centraliza
+        checks_frame.pack(expand=True)
 
         ttk.Checkbutton(
             checks_frame,
@@ -518,7 +561,7 @@ class AudioInterpolatorApp:
         ttk.Checkbutton(
             checks_frame,
             text="Normalizar",
-            variable=self.normalize_var,  # TEXTO ABREVIADO
+            variable=self.normalize_var,
             style='Modern.TCheckbutton'
         ).pack(side=tk.LEFT, padx=(2, 0))
 
@@ -530,7 +573,7 @@ class AudioInterpolatorApp:
         track2_card = self.create_card(scrollable_frame, "🎵 ÁUDIO 2", top_margin=5, compact=True)
         self.create_track_controls_compact(track2_card, 1)
 
-        # 4. INTERPOLAÇÃO - 3 LINHAS
+        # 4. INTERPOLAÇÃO - Agora com mais linhas para o modo conexão
         interp_card = self.create_card(scrollable_frame, "🔄 INTERPOLAÇÃO", top_margin=5, compact=True)
 
         # ===== LINHA 1: FATOR DE INTERPOLAÇÃO =====
@@ -545,7 +588,6 @@ class AudioInterpolatorApp:
             bg=self.colors['card_bg']
         ).pack(side=tk.LEFT)
 
-        # Slider de interpolação (mais largo)
         interp_slider = ttk.Scale(
             interp_row1,
             from_=0,
@@ -600,12 +642,45 @@ class AudioInterpolatorApp:
         )
         self.random_label.pack(side=tk.RIGHT)
 
-        # ===== LINHA 3: GANHO =====
-        interp_row3 = tk.Frame(interp_card, bg=self.colors['card_bg'])
-        interp_row3.pack(fill=tk.X, pady=(2, 5))
+        # ===== LINHA 3: DURAÇÃO DO GRÃO DE CONEXÃO =====
+        self.connection_row = tk.Frame(interp_card, bg=self.colors['card_bg'])
+        self.connection_row.pack(fill=tk.X, pady=(2, 3))
 
         tk.Label(
-            interp_row3,
+            self.connection_row,
+            text="Conexão:",
+            font=('Segoe UI', 8),
+            fg=self.colors['accent'],
+            bg=self.colors['card_bg']
+        ).pack(side=tk.LEFT)
+
+        self.connection_slider = ttk.Scale(
+            self.connection_row,
+            from_=10,
+            to=5000,
+            variable=self.connection_var,
+            command=self.on_connection_change,
+            style='Modern.Horizontal.TScale',
+            length=200
+        )
+        self.connection_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 10))
+
+        self.connection_label = tk.Label(
+            self.connection_row,
+            text=f"{self.connection_grain_duration}ms",
+            font=('Segoe UI', 8),
+            fg=self.colors['accent'],
+            bg=self.colors['card_bg'],
+            width=5
+        )
+        self.connection_label.pack(side=tk.RIGHT)
+
+        # ===== LINHA 4: GANHO =====
+        interp_row4 = tk.Frame(interp_card, bg=self.colors['card_bg'])
+        interp_row4.pack(fill=tk.X, pady=(2, 5))
+
+        tk.Label(
+            interp_row4,
             text="Ganho:",
             font=('Segoe UI', 8),
             fg=self.colors['fg'],
@@ -613,7 +688,7 @@ class AudioInterpolatorApp:
         ).pack(side=tk.LEFT)
 
         gain_slider = ttk.Scale(
-            interp_row3,
+            interp_row4,
             from_=-24,
             to=24,
             variable=self.interp_gain_var,
@@ -624,7 +699,7 @@ class AudioInterpolatorApp:
         gain_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 10))
 
         self.interp_gain_label = tk.Label(
-            interp_row3,
+            interp_row4,
             text="0.0 dB",
             font=('Segoe UI', 8),
             fg=self.colors['primary'],
@@ -633,7 +708,7 @@ class AudioInterpolatorApp:
         )
         self.interp_gain_label.pack(side=tk.RIGHT)
 
-        # ===== MODO DE INTERPOLAÇÃO (linha 4) =====
+        # ===== LINHA 5: MODO DE INTERPOLAÇÃO =====
         mode_frame = tk.Frame(interp_card, bg=self.colors['card_bg'])
         mode_frame.pack(fill=tk.X, pady=(2, 5))
 
@@ -676,7 +751,8 @@ class AudioInterpolatorApp:
             text="▶",
             command=self.play_interpolation,
             style='Secondary.TButton',
-            width=8
+            width=8,
+            state='disabled'
         )
         self.play_interp_btn.pack(side=tk.LEFT, padx=(0, 2))
 
@@ -743,7 +819,7 @@ class AudioInterpolatorApp:
         self.canvas = FigureCanvasTkAgg(self.fig, right_column)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # Barra de status COMPACTA
+        # Barra de status
         self.status_var = tk.StringVar(value="Pronto")
         status_bar = tk.Label(
             main_frame,
@@ -757,15 +833,685 @@ class AudioInterpolatorApp:
         )
         status_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
 
+        # Configura visibilidade inicial do controle de conexão
+        self.update_connection_controls_visibility()
+
         # Iniciar monitoramento
         self.root.after(100, self.monitor_queue)
+
+    def update_connection_controls_visibility(self):
+        """Atualiza visibilidade dos controles de conexão baseado no modo selecionado"""
+        if "Conexão" in self.interpolation_mode:
+            self.connection_row.pack(fill=tk.X, pady=(2, 3))
+        else:
+            self.connection_row.pack_forget()
+
+    def on_interpolation_mode_change(self, event=None):
+        """Atualiza quando modo de interpolação muda"""
+        self.interpolation_mode = self.mode_var.get()
+        self.update_connection_controls_visibility()
+
+    def on_connection_change(self, value):
+        """Atualiza quando duração do grão de conexão muda"""
+        try:
+            self.connection_grain_duration = int(float(value))
+            self.connection_var.set(self.connection_grain_duration)
+            self.connection_label.config(text=f"{self.connection_grain_duration}ms")
+        except Exception as e:
+            print(f"Erro ao atualizar duração da conexão: {e}")
+
+    def _generate_interpolation_with_connection(self):
+        """Gera interpolação com grãos de conexão entre áudios diferentes"""
+        try:
+            track1 = self.audio_tracks[0]
+            track2 = self.audio_tracks[1]
+
+            # VERIFICAÇÃO DE DADOS
+            if not track1.grain_frequencies or not track2.grain_frequencies:
+                raise ValueError("Dados espectrais insuficientes. Processe ambos os áudios primeiro!")
+
+            # 1. PASSO: Cria sequência granular simples (como no modo Granular Simples)
+            grains1 = track1.synthesized_grains
+            grains2 = track2.synthesized_grains
+
+            if not grains1 or not grains2:
+                raise ValueError("Ambos os áudios precisam ser processados primeiro!")
+
+            # Fator de interpolação (0-1)
+            alpha = self.interpolation_factor / 100.0
+
+            # Número de grãos disponíveis
+            num_grains1 = len(grains1)
+            num_grains2 = len(grains2)
+
+            # Para qualquer fator (incluindo 0% e 100%)
+            grains_from_1 = int(num_grains1 * (1 - alpha))
+            grains_from_2 = int(num_grains2 * alpha)
+
+            # Ajusta casos extremos
+            if alpha == 0.0:  # 100% áudio 1
+                grains_from_1 = num_grains1
+                grains_from_2 = 0
+            elif alpha == 1.0:  # 100% áudio 2
+                grains_from_1 = 0
+                grains_from_2 = num_grains2
+
+            total_grains = grains_from_1 + grains_from_2
+
+            # Seleciona grãos distribuídos uniformemente
+            if grains_from_1 > 0:
+                step1 = max(1, num_grains1 // grains_from_1)
+                indices1 = list(range(0, num_grains1, step1))[:grains_from_1]
+                selected_grains1 = [grains1[i] for i in indices1]
+                selected_freqs1 = [track1.grain_frequencies[i] for i in indices1]
+                selected_mags1 = [track1.grain_magnitudes[i] for i in indices1]
+                selected_phases1 = [track1.grain_phases[i] for i in indices1]
+                selected_indices1 = indices1
+            else:
+                selected_grains1 = []
+                selected_freqs1 = []
+                selected_mags1 = []
+                selected_phases1 = []
+                selected_indices1 = []
+
+            if grains_from_2 > 0:
+                step2 = max(1, num_grains2 // grains_from_2)
+                indices2 = list(range(0, num_grains2, step2))[:grains_from_2]
+                selected_grains2 = [grains2[i] for i in indices2]
+                selected_freqs2 = [track2.grain_frequencies[i] for i in indices2]
+                selected_mags2 = [track2.grain_magnitudes[i] for i in indices2]
+                selected_phases2 = [track2.grain_phases[i] for i in indices2]
+                selected_indices2 = indices2
+            else:
+                selected_grains2 = []
+                selected_freqs2 = []
+                selected_mags2 = []
+                selected_phases2 = []
+                selected_indices2 = []
+
+            if total_grains == 0:
+                raise ValueError("Nenhum grão selecionado para interpolação!")
+
+            # 2. PASSO: Monta sequência base com identificação de origem
+            sequence = []
+            source_info = []  # (track_id, original_index)
+
+            # Determina qual áudio tem mais grãos selecionados
+            if grains_from_1 >= grains_from_2:
+                # Mais grãos do áudio 1
+                if grains_from_2 > 0:
+                    step = max(1, grains_from_1 // grains_from_2)
+
+                    idx1 = 0
+                    idx2 = 0
+                    for i in range(total_grains):
+                        if i % (step + 1) < step and idx1 < len(selected_grains1):
+                            # Pega grão do áudio 1
+                            sequence.append(selected_grains1[idx1])
+                            source_info.append((0, selected_indices1[idx1]))
+                            idx1 += 1
+                        elif idx2 < len(selected_grains2):
+                            # Pega grão do áudio 2
+                            sequence.append(selected_grains2[idx2])
+                            source_info.append((1, selected_indices2[idx2]))
+                            idx2 += 1
+                        elif idx1 < len(selected_grains1):
+                            # Se acabou áudio 2, pega do áudio 1
+                            sequence.append(selected_grains1[idx1])
+                            source_info.append((0, selected_indices1[idx1]))
+                            idx1 += 1
+                else:
+                    # Só tem áudio 1
+                    for i, grain in enumerate(selected_grains1):
+                        sequence.append(grain)
+                        source_info.append((0, selected_indices1[i]))
+            else:
+                # Mais grãos do áudio 2
+                if grains_from_1 > 0:
+                    step = max(1, grains_from_2 // grains_from_1)
+
+                    idx1 = 0
+                    idx2 = 0
+                    for i in range(total_grains):
+                        if i % (step + 1) < step and idx2 < len(selected_grains2):
+                            # Pega grão do áudio 2
+                            sequence.append(selected_grains2[idx2])
+                            source_info.append((1, selected_indices2[idx2]))
+                            idx2 += 1
+                        elif idx1 < len(selected_grains1):
+                            # Pega grão do áudio 1
+                            sequence.append(selected_grains1[idx1])
+                            source_info.append((0, selected_indices1[idx1]))
+                            idx1 += 1
+                        elif idx2 < len(selected_grains2):
+                            # Se acabou áudio 1, pega do áudio 2
+                            sequence.append(selected_grains2[idx2])
+                            source_info.append((1, selected_indices2[idx2]))
+                            idx2 += 1
+                else:
+                    # Só tem áudio 2
+                    for i, grain in enumerate(selected_grains2):
+                        sequence.append(grain)
+                        source_info.append((1, selected_indices2[i]))
+
+            # 3. PASSO: Aplica aleatoriedade (se configurada)
+            if self.randomness_factor > 0 and len(sequence) > 1:
+                num_swaps = int(len(sequence) * (self.randomness_factor / 200.0))
+                for _ in range(num_swaps):
+                    i, j = random.randint(0, len(sequence) - 1), random.randint(0, len(sequence) - 1)
+                    if i != j:
+                        sequence[i], sequence[j] = sequence[j], sequence[i]
+                        source_info[i], source_info[j] = source_info[j], source_info[i]
+
+            # 4. PASSO: Identifica transições que precisam de grãos de conexão
+            # Precisamos dos dados espectrais para cada grão
+            spectral_data_for_sequence = []
+            for track_id, orig_idx in source_info:
+                if track_id == 0:
+                    idx_in_selected = selected_indices1.index(orig_idx)
+                    spectral_data_for_sequence.append((
+                        selected_freqs1[idx_in_selected],
+                        selected_mags1[idx_in_selected],
+                        selected_phases1[idx_in_selected]
+                    ))
+                else:
+                    idx_in_selected = selected_indices2.index(orig_idx)
+                    spectral_data_for_sequence.append((
+                        selected_freqs2[idx_in_selected],
+                        selected_mags2[idx_in_selected],
+                        selected_phases2[idx_in_selected]
+                    ))
+
+            # 5. PASSO: Cria sequência FINAL com grãos de conexão intercalados
+            final_sequence = []  # Grãos intercalados (normal, conexão, normal, conexão, ...)
+            final_sequence_info = []  # Informação sobre cada grão: ('normal', track_id) ou ('connection', -1)
+            connection_count = 0
+
+            for i in range(len(sequence)):
+                # Adiciona o grão normal atual
+                final_sequence.append(sequence[i])
+                final_sequence_info.append(('normal', source_info[i][0]))
+
+                # Verifica se precisa adicionar grão de conexão após este grão
+                if i < len(sequence) - 1:
+                    current_track_id = source_info[i][0]
+                    next_track_id = source_info[i + 1][0]
+
+                    # Verifica se é uma transição entre áudios diferentes
+                    if current_track_id != next_track_id:
+                        # Obtém dados espectrais para criar o grão de conexão
+                        freq1, mag1, phase1 = spectral_data_for_sequence[i]
+                        freq2, mag2, phase2 = spectral_data_for_sequence[i + 1]
+
+                        # Cria grão de conexão SEM envelope
+                        connection_grain = self.grain_processor.create_connection_grain_glissando(
+                            freq1, mag1, phase1,
+                            freq2, mag2, phase2,
+                            self.connection_grain_duration,
+                            track1.sample_rate
+                        )
+
+                        # Adiciona grão de conexão à sequência
+                        final_sequence.append(connection_grain)
+                        final_sequence_info.append(('connection', -1))
+                        connection_count += 1
+
+                # Atualiza progresso
+                if len(sequence) > 0:
+                    progress = (i + 1) / len(sequence) * 50
+                    self.audio_queue.put(('interpolation_progress', progress))
+
+            # 6. PASSO: Reconstrói áudio com CROSSFADE mantendo a ordem correta
+            print(f"DEBUG: Grãos normais: {len(sequence)}, Grãos de conexão: {connection_count}, Total na sequência final: {len(final_sequence)}")
+            print(f"DEBUG: Sequência: {[info[0] for info in final_sequence_info]}")
+
+            # Configurações para reconstrução
+            normal_grain_length = len(grains1[0]) if grains1 else len(grains2[0])
+            connection_grain_length = int(self.connection_grain_duration * track1.sample_rate / 1000)
+
+            # Parâmetros de crossfade (5ms como sugerido)
+            crossfade_samples = int(0.005 * track1.sample_rate)  # 5ms em samples
+            crossfade_samples = min(crossfade_samples, normal_grain_length // 4)  # No máximo 1/4 do grão
+            crossfade_samples = max(10, crossfade_samples)  # Mínimo de 10 samples
+
+            # Hop size para grãos normais
+            normal_hop_size = int(normal_grain_length * (1 - self.overlap))
+
+            # Calcula duração total estimada
+            total_duration_samples = 0
+            for i, (grain, info) in enumerate(zip(final_sequence, final_sequence_info)):
+                grain_type, _ = info
+
+                if grain_type == 'connection':
+                    # Grão de conexão ocupa sua duração completa
+                    total_duration_samples += len(grain)
+                else:
+                    # Grão normal
+                    if i == len(final_sequence) - 1:
+                        # Último grão ocupa sua duração completa
+                        total_duration_samples += normal_grain_length
+                    else:
+                        # Grão normal usa hop size
+                        total_duration_samples += normal_hop_size
+
+            print(f"DEBUG: Duração total estimada: {total_duration_samples/track1.sample_rate:.2f}s")
+
+            # Cria array para o áudio interpolado
+            interpolated = np.zeros(total_duration_samples)
+
+            # Envelopes para diferentes tipos de grãos
+            normal_envelope = self.grain_processor.create_tukey_envelope(normal_grain_length, alpha=0.4)
+
+            # Para crossfade linear
+            fade_in = np.linspace(0, 1, crossfade_samples)
+            fade_out = np.linspace(1, 0, crossfade_samples)
+
+            # Posição atual no áudio
+            current_position = 0
+
+            # Processa a sequência FINAL mantendo a ordem correta
+            for i in range(len(final_sequence)):
+                grain = final_sequence[i]
+                grain_type, track_id = final_sequence_info[i]
+
+                if grain_type == 'normal':
+                    # Grão normal
+                    # Ajusta tamanho se necessário
+                    if len(grain) != len(normal_envelope):
+                        if len(grain) < len(normal_envelope):
+                            padded = np.zeros(len(normal_envelope))
+                            padded[:len(grain)] = grain
+                            grain = padded
+                        else:
+                            grain = grain[:len(normal_envelope)]
+
+                    # Aplica envelope
+                    enveloped_grain = grain * normal_envelope
+                    grain_length = len(enveloped_grain)
+
+                    # Verifica se o próximo grão é de conexão
+                    next_is_connection = (i + 1 < len(final_sequence) and
+                                        final_sequence_info[i + 1][0] == 'connection')
+
+                    if next_is_connection:
+                        # Este grão normal é seguido por um grão de conexão
+                        # Aplica fade-out nos últimos crossfade_samples
+
+                        # 1. Adiciona o grão normal inteiro primeiro
+                        end_pos = current_position + grain_length
+                        if end_pos <= len(interpolated):
+                            interpolated[current_position:end_pos] += enveloped_grain
+                        else:
+                            available = len(interpolated) - current_position
+                            if available > 0:
+                                interpolated[current_position:] += enveloped_grain[:available]
+
+                        # 2. Aplica fade-out nos últimos crossfade_samples
+                        if grain_length >= crossfade_samples:
+                            fade_out_start = current_position + grain_length - crossfade_samples
+                            if fade_out_start >= 0 and fade_out_start + crossfade_samples <= len(interpolated):
+                                # Multiplica a região de fade-out pelo envelope de fade-out
+                                interpolated[fade_out_start:fade_out_start + crossfade_samples] *= fade_out
+
+                        # 3. Avança pelo hop size (não pela duração completa)
+                        current_position += normal_hop_size
+
+                    else:
+                        # Grão normal sem conexão seguinte
+                        # Adiciona normalmente
+                        end_pos = current_position + grain_length
+                        if end_pos <= len(interpolated):
+                            interpolated[current_position:end_pos] += enveloped_grain
+                        else:
+                            available = len(interpolated) - current_position
+                            if available > 0:
+                                interpolated[current_position:] += enveloped_grain[:available]
+
+                        # Avança
+                        if i < len(final_sequence) - 1:
+                            current_position += normal_hop_size
+                        else:
+                            current_position += grain_length
+
+                else:  # grain_type == 'connection'
+                    # Grão de conexão
+                    grain_length = len(grain)
+
+                    # Verifica se o grão anterior era normal
+                    prev_is_normal = (i > 0 and final_sequence_info[i - 1][0] == 'normal')
+
+                    if prev_is_normal:
+                        # Este grão de conexão segue um grão normal
+                        # A posição já foi ajustada pelo hop size do grão normal anterior
+                        # Adiciona o grão de conexão
+                        end_pos = current_position + grain_length
+                        if end_pos <= len(interpolated):
+                            interpolated[current_position:end_pos] += grain
+                        else:
+                            available = len(interpolated) - current_position
+                            if available > 0:
+                                interpolated[current_position:] += grain[:available]
+
+                        # Avança pela duração completa do grão de conexão
+                        current_position += grain_length
+
+                        # Verifica se o próximo grão é normal
+                        next_is_normal = (i + 1 < len(final_sequence) and
+                                        final_sequence_info[i + 1][0] == 'normal')
+
+                        if next_is_normal:
+                            # O próximo grão normal aplicará fade-in nos primeiros crossfade_samples
+                            # Não precisamos fazer nada aqui
+                            pass
+                    else:
+                        # Grão de conexão no início ou após outro grão de conexão (improvável)
+                        # Adiciona normalmente
+                        end_pos = current_position + grain_length
+                        if end_pos <= len(interpolated):
+                            interpolated[current_position:end_pos] += grain
+                        else:
+                            available = len(interpolated) - current_position
+                            if available > 0:
+                                interpolated[current_position:] += grain[:available]
+
+                        current_position += grain_length
+
+                # Atualiza progresso
+                if len(final_sequence) > 0:
+                    progress = 50 + ((i + 1) / len(final_sequence) * 50)
+                    self.audio_queue.put(('interpolation_progress', progress))
+
+            # 7. PASSO: Aplica configurações finais
+            max_val = np.max(np.abs(interpolated))
+
+            # Normalização automática
+            if self.normalize_var.get() and max_val > 0:
+                interpolated = interpolated / max_val * 0.9
+            elif max_val > 1.0:
+                interpolated = interpolated / max_val * 0.95
+
+            # Preservar dinâmica
+            if self.dynamic_var.get():
+                interpolated = self._apply_dynamics_to_interpolation(
+                    interpolated, track1, track2, self.interpolation_factor
+                )
+
+            # Aplica ganho da interpolação
+            interpolated = interpolated * self.interpolation_gain_linear
+
+            # Limiter final
+            max_amp = np.max(np.abs(interpolated))
+            if max_amp > 1.0:
+                interpolated = np.tanh(interpolated * 0.8) * 1.2
+
+            self.interpolated_audio = interpolated
+            self.interpolated_audio_raw = interpolated.copy()
+
+            # Atualiza interface
+            self.audio_queue.put(('interpolation_done', interpolated))
+
+        except Exception as e:
+            import traceback
+            print(f"Erro na interpolação com conexão: {str(e)}")
+            print(traceback.format_exc())
+            self.audio_queue.put(('error', -1, str(e)))
+
+    def _generate_interpolation_thread(self):
+        """Thread para geração da interpolação - agora com suporte a conexão"""
+        try:
+            # Verifica se temos os dados necessários
+            track1 = self.audio_tracks[0]
+            track2 = self.audio_tracks[1]
+
+            if track1.original is None or track2.original is None:
+                raise ValueError("Carregue ambos os áudios primeiro!")
+
+            # VERIFICAÇÃO DE TAXAS DE AMOSTRAGEM
+            if track1.sample_rate != track2.sample_rate:
+                warning_msg = (
+                    f"⚠️ AVISO: Taxas de amostragem diferentes!\n"
+                    f"Áudio 1: {track1.sample_rate} Hz\n"
+                    f"Áudio 2: {track2.sample_rate} Hz\n"
+                    f"A interpolação será feita em {track1.sample_rate} Hz (taxa do primeiro áudio).\n\n"
+                    f"Implicações:\n"
+                    f"• O áudio 2 será reproduzido em velocidade diferente\n"
+                    f"• Pode haver alteração no timbre, altura e duração"
+                )
+                self.audio_queue.put(('warning', warning_msg))
+
+            # Escolhe o método baseado no modo
+            if "Conexão" in self.interpolation_mode:
+                # Modo com Conexão de Grãos
+                self._generate_interpolation_with_connection()
+            else:
+                # Modo Granular Simples (original)
+                self._generate_simple_granular_interpolation()
+
+        except Exception as e:
+            import traceback
+            print(f"Erro geral na interpolação: {str(e)}")
+            print(traceback.format_exc())
+            self.audio_queue.put(('error', -1, str(e)))
+
+    def _generate_simple_granular_interpolation(self):
+        """Gera interpolação granular simples (método original)"""
+        try:
+            track1 = self.audio_tracks[0]
+            track2 = self.audio_tracks[1]
+
+            grains1 = track1.synthesized_grains
+            grains2 = track2.synthesized_grains
+
+            if not grains1 or not grains2:
+                raise ValueError("Ambos os áudios precisam ser processados primeiro!")
+
+            # Fator de interpolação (0-1)
+            alpha = self.interpolation_factor / 100.0
+
+            # Número de grãos disponíveis
+            num_grains1 = len(grains1)
+            num_grains2 = len(grains2)
+
+            # Para qualquer fator (incluindo 0% e 100%)
+            grains_from_1 = int(num_grains1 * (1 - alpha))
+            grains_from_2 = int(num_grains2 * alpha)
+
+            # Ajusta casos extremos
+            if alpha == 0.0:  # 100% áudio 1
+                grains_from_1 = num_grains1
+                grains_from_2 = 0
+            elif alpha == 1.0:  # 100% áudio 2
+                grains_from_1 = 0
+                grains_from_2 = num_grains2
+
+            total_grains = grains_from_1 + grains_from_2
+
+            # Seleciona grãos distribuídos uniformemente
+            if grains_from_1 > 0:
+                step1 = max(1, num_grains1 // grains_from_1)
+                indices1 = list(range(0, num_grains1, step1))[:grains_from_1]
+                selected_grains1 = [grains1[i] for i in indices1]
+            else:
+                selected_grains1 = []
+
+            if grains_from_2 > 0:
+                step2 = max(1, num_grains2 // grains_from_2)
+                indices2 = list(range(0, num_grains2, step2))[:grains_from_2]
+                selected_grains2 = [grains2[i] for i in indices2]
+            else:
+                selected_grains2 = []
+
+            if total_grains == 0:
+                raise ValueError("Nenhum grão selecionado para interpolação!")
+
+            # Encontra o tamanho mais comum entre os grãos
+            grain_lengths1 = [len(g) for g in grains1]
+            grain_lengths2 = [len(g) for g in grains2]
+            all_grain_lengths = grain_lengths1 + grain_lengths2
+
+            if not all_grain_lengths:
+                raise ValueError("Nenhum grão com tamanho válido!")
+
+            from collections import Counter
+            length_counts = Counter(all_grain_lengths)
+            standard_grain_length = length_counts.most_common(1)[0][0]
+
+            # Cria sequência de grãos
+            sequence = []
+            idx1 = 0
+            idx2 = 0
+
+            # Determina qual áudio tem mais grãos selecionados
+            if grains_from_1 >= grains_from_2:
+                # Mais grãos do áudio 1
+                if grains_from_2 > 0:
+                    step = max(1, grains_from_1 // grains_from_2)
+
+                    for i in range(total_grains):
+                        if i % (step + 1) < step and idx1 < len(selected_grains1):
+                            # Pega grão do áudio 1
+                            grain = selected_grains1[idx1]
+                            sequence.append(grain)
+                            idx1 += 1
+                        elif idx2 < len(selected_grains2):
+                            # Pega grão do áudio 2
+                            grain = selected_grains2[idx2]
+                            sequence.append(grain)
+                            idx2 += 1
+                        elif idx1 < len(selected_grains1):
+                            # Se acabou áudio 2, pega do áudio 1
+                            grain = selected_grains1[idx1]
+                            sequence.append(grain)
+                            idx1 += 1
+                else:
+                    # Só tem áudio 1
+                    for grain in selected_grains1:
+                        sequence.append(grain)
+            else:
+                # Mais grãos do áudio 2
+                if grains_from_1 > 0:
+                    step = max(1, grains_from_2 // grains_from_1)
+
+                    for i in range(total_grains):
+                        if i % (step + 1) < step and idx2 < len(selected_grains2):
+                            # Pega grão do áudio 2
+                            grain = selected_grains2[idx2]
+                            sequence.append(grain)
+                            idx2 += 1
+                        elif idx1 < len(selected_grains1):
+                            # Pega grão do áudio 1
+                            grain = selected_grains1[idx1]
+                            sequence.append(grain)
+                            idx1 += 1
+                        elif idx2 < len(selected_grains2):
+                            # Se acabou áudio 1, pega do áudio 2
+                            grain = selected_grains2[idx2]
+                            sequence.append(grain)
+                            idx2 += 1
+                else:
+                    # Só tem áudio 2
+                    for grain in selected_grains2:
+                        sequence.append(grain)
+
+            # Verifica se temos grãos suficientes
+            if len(sequence) == 0:
+                raise ValueError("Nenhum grão válido após padronização!")
+
+            # Aplica aleatoriedade (se configurada)
+            if self.randomness_factor > 0 and len(sequence) > 1:
+                num_swaps = int(len(sequence) * (self.randomness_factor / 200.0))
+                for _ in range(num_swaps):
+                    i, j = random.randint(0, len(sequence) - 1), random.randint(0, len(sequence) - 1)
+                    if i != j:
+                        sequence[i], sequence[j] = sequence[j], sequence[i]
+
+            # Reconstrói áudio
+            grain_length = standard_grain_length
+            hop_size = int(grain_length * (1 - self.overlap))
+
+            # CORREÇÃO: Para 0% ou 100%, usa o comprimento original
+            if alpha == 0.0 and track1.original is not None:
+                total_length = len(track1.original)
+            elif alpha == 1.0 and track2.original is not None:
+                total_length = len(track2.original)
+            else:
+                total_length = (len(sequence) - 1) * hop_size + grain_length
+
+            interpolated = np.zeros(total_length)
+
+            # Cria envelope
+            envelope = self.grain_processor.create_tukey_envelope(grain_length, alpha=0.4)
+
+            for i, grain in enumerate(sequence):
+                start = i * hop_size
+                end = start + grain_length
+
+                if start >= total_length:
+                    break
+
+                # Verifica tamanho
+                if len(grain) != len(envelope):
+                    # Ajusta o grão para o tamanho do envelope
+                    if len(grain) < len(envelope):
+                        padded = np.zeros(len(envelope))
+                        padded[:len(grain)] = grain
+                        grain = padded
+                    else:
+                        grain = grain[:len(envelope)]
+
+                enveloped_grain = grain * envelope
+
+                if end > total_length:
+                    end = total_length
+                    enveloped_grain = enveloped_grain[:end-start]
+
+                interpolated[start:end] += enveloped_grain
+
+                # Atualiza progresso
+                if len(sequence) > 0 and i % max(1, len(sequence) // 10) == 0:
+                    progress = (i + 1) / len(sequence) * 100
+                    self.audio_queue.put(('interpolation_progress', progress))
+
+            # Aplica configurações
+            max_val = np.max(np.abs(interpolated))
+
+            # Normalização automática
+            if self.normalize_var.get() and max_val > 0:
+                interpolated = interpolated / max_val * 0.9
+            elif max_val > 1.0:
+                interpolated = interpolated / max_val * 0.95
+
+            # Preservar dinâmica
+            if self.dynamic_var.get():
+                interpolated = self._apply_dynamics_to_interpolation(
+                    interpolated, track1, track2, self.interpolation_factor
+                )
+
+            # Aplica ganho da interpolação
+            interpolated = interpolated * self.interpolation_gain_linear
+
+            # Limiter final
+            max_amp = np.max(np.abs(interpolated))
+            if max_amp > 1.0:
+                interpolated = np.tanh(interpolated * 0.8) * 1.2
+
+            self.interpolated_audio = interpolated
+            self.interpolated_audio_raw = interpolated.copy()
+
+            # Atualiza interface
+            self.audio_queue.put(('interpolation_done', interpolated))
+
+        except Exception as e:
+            import traceback
+            print(f"Erro na interpolação granular simples: {str(e)}")
+            print(traceback.format_exc())
+            self.audio_queue.put(('error', -1, str(e)))
 
     def create_card(self, parent, title, top_margin=0, compact=False):
         """Cria um card moderno"""
         card = tk.Frame(parent, bg=self.colors['card_bg'], relief=tk.FLAT)
         card.pack(fill=tk.X, pady=(top_margin, 0))
 
-        # Título
         title_label = tk.Label(
             card,
             text=title,
@@ -776,11 +1522,9 @@ class AudioInterpolatorApp:
         )
         title_label.pack(anchor=tk.W, padx=8 if compact else 15)
 
-        # Linha divisória fina
         separator = tk.Frame(card, height=1, bg=self.colors['border'])
         separator.pack(fill=tk.X, padx=8 if compact else 15)
 
-        # Conteúdo do card
         content = tk.Frame(card, bg=self.colors['card_bg'],
                         padx=8 if compact else 15,
                         pady=6 if compact else 10)
@@ -792,11 +1536,9 @@ class AudioInterpolatorApp:
         """Cria controles compactos para um track"""
         track = self.audio_tracks[track_index]
 
-        # Linha superior: botões
         top_frame = tk.Frame(parent, bg=self.colors['card_bg'])
         top_frame.pack(fill=tk.X, pady=(0, 3))
 
-        # Botões
         ttk.Button(
             top_frame,
             text="📂 Abrir",
@@ -814,7 +1556,6 @@ class AudioInterpolatorApp:
         )
         track.process_btn.pack(side=tk.LEFT, padx=(0, 2))
 
-        # Informações do arquivo (uma linha)
         track.info_var = tk.StringVar(value="Nenhum arquivo")
         info_label = tk.Label(
             top_frame,
@@ -826,7 +1567,6 @@ class AudioInterpolatorApp:
         )
         info_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
 
-        # Status
         track.status_var = tk.StringVar(value="")
         track.status_label = tk.Label(
             top_frame,
@@ -837,7 +1577,6 @@ class AudioInterpolatorApp:
         )
         track.status_label.pack(side=tk.RIGHT)
 
-        # Linha do meio: ganho
         gain_frame = tk.Frame(parent, bg=self.colors['card_bg'])
         gain_frame.pack(fill=tk.X, pady=(0, 3))
 
@@ -849,7 +1588,6 @@ class AudioInterpolatorApp:
             bg=self.colors['card_bg']
         ).pack(side=tk.LEFT)
 
-        # Slider de ganho
         track.gain_var = tk.DoubleVar(value=0)
         gain_slider = ttk.Scale(
             gain_frame,
@@ -862,7 +1600,6 @@ class AudioInterpolatorApp:
         )
         gain_slider.pack(side=tk.LEFT, padx=(5, 5), fill=tk.X, expand=True)
 
-        # Label do valor
         track.gain_label = tk.Label(
             gain_frame,
             text="0.0 dB",
@@ -873,18 +1610,16 @@ class AudioInterpolatorApp:
         )
         track.gain_label.pack(side=tk.RIGHT)
 
-        # Linha inferior: botões de ação
         action_frame = tk.Frame(parent, bg=self.colors['card_bg'])
         action_frame.pack(fill=tk.X)
 
-        # Botões de reprodução/salvar - CORREÇÃO: Armazenar referências
         track.play_orig_btn = ttk.Button(
             action_frame,
             text="▶ Original",
             command=lambda idx=track_index: self.play_track(idx, 'original'),
             style='Secondary.TButton',
             width=12,
-            state='disabled'  # Inicia desabilitado
+            state='disabled'
         )
         track.play_orig_btn.pack(side=tk.LEFT, padx=(5, 2))
 
@@ -894,11 +1629,10 @@ class AudioInterpolatorApp:
             command=lambda idx=track_index: self.play_track(idx, 'synthesized'),
             style='Primary.TButton',
             width=15,
-            state='disabled'  # Inicia desabilitado
+            state='disabled'
         )
         track.play_synth_btn.pack(side=tk.LEFT, padx=(0, 2))
 
-        # Botão salvar
         track.save_btn = ttk.Button(
             action_frame,
             text="💾",
@@ -910,121 +1644,121 @@ class AudioInterpolatorApp:
         track.save_btn.pack(side=tk.RIGHT)
 
     def setup_styles(self):
-        """Configura estilos modernos para ttk"""
-        style = ttk.Style()
-        style.theme_use('clam')
+            """Configura estilos modernos para ttk"""
+            style = ttk.Style()
+            style.theme_use('clam')
 
-        # Configurar cores base
-        style.configure('.',
-                    background=self.colors['card_bg'],
-                    foreground=self.colors['fg'],
-                    fieldbackground=self.colors['card_bg'],
-                    troughcolor=self.colors['secondary'])
+            # Configurar cores base
+            style.configure('.',
+                        background=self.colors['card_bg'],
+                        foreground=self.colors['fg'],
+                        fieldbackground=self.colors['card_bg'],
+                        troughcolor=self.colors['secondary'])
 
-        # Botão secundário
-        style.configure('Secondary.TButton',
-                    background=self.colors['secondary'],
-                    foreground=self.colors['fg'],
-                    borderwidth=0,
-                    focusthickness=0,
-                    padding=2,
-                    font=('Segoe UI', 8))
+            # Botão secundário
+            style.configure('Secondary.TButton',
+                        background=self.colors['secondary'],
+                        foreground=self.colors['fg'],
+                        borderwidth=0,
+                        focusthickness=0,
+                        padding=2,
+                        font=('Segoe UI', 8))
 
-        # MAPEAMENTO
-        style.map('Secondary.TButton',
-                background=[
-                    ('active', '#6a6b80'),
-                    ('pressed', '#4a5a70'),
-                    ('disabled', '#585b70')
-                ],
-                foreground=[
-                    ('disabled', '#a6adc8')  # Apenas texto mais claro
-                ])
+            # MAPEAMENTO
+            style.map('Secondary.TButton',
+                    background=[
+                        ('active', '#6a6b80'),
+                        ('pressed', '#4a5a70'),
+                        ('disabled', '#585b70')
+                    ],
+                    foreground=[
+                        ('disabled', '#a6adc8')  # Apenas texto mais claro
+                    ])
 
-        # Botão primário
-        style.configure('Primary.TButton',
-                    background=self.colors['primary'],
-                    foreground=self.colors['bg'],
-                    borderwidth=0,
-                    focusthickness=0,
-                    padding=2,
-                    font=('Segoe UI', 8))
-        style.map('Primary.TButton',
-                background=[('active', '#7aa3e0'), ('disabled', '#4a5a70')])
+            # Botão primário
+            style.configure('Primary.TButton',
+                        background=self.colors['primary'],
+                        foreground=self.colors['bg'],
+                        borderwidth=0,
+                        focusthickness=0,
+                        padding=2,
+                        font=('Segoe UI', 8))
+            style.map('Primary.TButton',
+                    background=[('active', '#7aa3e0'), ('disabled', '#4a5a70')])
 
-        # Botão de destaque
-        style.configure('Accent.TButton',
-                    background=self.colors['accent'],
-                    foreground=self.colors['bg'],
-                    borderwidth=0,
-                    focusthickness=0,
-                    padding=3,
-                    font=('Segoe UI', 8))
-        style.map('Accent.TButton',
-                background=[('active', '#e5b2d7'), ('disabled', '#4a5a70')])
+            # Botão de destaque
+            style.configure('Accent.TButton',
+                        background=self.colors['accent'],
+                        foreground=self.colors['bg'],
+                        borderwidth=0,
+                        focusthickness=0,
+                        padding=3,
+                        font=('Segoe UI', 8))
+            style.map('Accent.TButton',
+                    background=[('active', '#e5b2d7'), ('disabled', '#4a5a70')])
 
-        # Slider moderno
-        style.configure('Modern.Horizontal.TScale',
-                    background=self.colors['card_bg'])
+            # Slider moderno
+            style.configure('Modern.Horizontal.TScale',
+                        background=self.colors['card_bg'])
 
-        # Checkbox moderno
-        style.configure('Modern.TCheckbutton',
-                    background=self.colors['card_bg'],
-                    foreground=self.colors['fg'],
-                    font=('Segoe UI', 8))
-        style.map('Modern.TCheckbutton',
-                background=[('active', self.colors['card_bg'])])
+            # Checkbox moderno
+            style.configure('Modern.TCheckbutton',
+                        background=self.colors['card_bg'],
+                        foreground=self.colors['fg'],
+                        font=('Segoe UI', 8))
+            style.map('Modern.TCheckbutton',
+                    background=[('active', self.colors['card_bg'])])
 
-        # Combobox
-        style.configure('TCombobox',
-                    fieldbackground=self.colors['card_bg'],  # Fundo cinza igual aos cards
-                    background=self.colors['card_bg'],
-                    foreground=self.colors['fg'],
-                    borderwidth=1,
-                    relief='flat',
-                    padding=3,
-                    arrowsize=12,  # Tamanho das setinhas
-                    font=('Segoe UI', 8))  # Fonte igual aos sliders
+            # Combobox
+            style.configure('TCombobox',
+                        fieldbackground=self.colors['card_bg'],  # Fundo cinza igual aos cards
+                        background=self.colors['card_bg'],
+                        foreground=self.colors['fg'],
+                        borderwidth=1,
+                        relief='flat',
+                        padding=3,
+                        arrowsize=12,  # Tamanho das setinhas
+                        font=('Segoe UI', 8))  # Fonte igual aos sliders
 
-        # Mapeamento para estados
-        style.map('TCombobox',
-                fieldbackground=[
-                    ('readonly', self.colors['card_bg']),
-                    ('active', self.colors['card_bg']),
-                    ('disabled', '#4a5a70')
-                ],
-                background=[
-                    ('readonly', self.colors['card_bg']),
-                    ('active', self.colors['card_bg']),
-                    ('disabled', '#4a5a70')
-                ],
-                foreground=[
-                    ('readonly', self.colors['fg']),
-                    ('active', self.colors['fg']),
-                    ('disabled', self.colors['fg_light'])
-                ],
-                selectbackground=[('readonly', self.colors['card_bg'])],  # Cor quando selecionado
-                selectforeground=[('readonly', self.colors['fg'])]  # Texto quando selecionado
-                )
+            # Mapeamento para estados
+            style.map('TCombobox',
+                    fieldbackground=[
+                        ('readonly', self.colors['card_bg']),
+                        ('active', self.colors['card_bg']),
+                        ('disabled', '#4a5a70')
+                    ],
+                    background=[
+                        ('readonly', self.colors['card_bg']),
+                        ('active', self.colors['card_bg']),
+                        ('disabled', '#4a5a70')
+                    ],
+                    foreground=[
+                        ('readonly', self.colors['fg']),
+                        ('active', self.colors['fg']),
+                        ('disabled', self.colors['fg_light'])
+                    ],
+                    selectbackground=[('readonly', self.colors['card_bg'])],  # Cor quando selecionado
+                    selectforeground=[('readonly', self.colors['fg'])]  # Texto quando selecionado
+                    )
 
-        # Listbox da combobox
-        style.configure('TCombobox.Listbox',
-                    background=self.colors['card_bg'],
-                    foreground=self.colors['fg'],
-                    selectbackground=self.colors['primary'],  # Item selecionado
-                    selectforeground=self.colors['bg'],
-                    borderwidth=0,
-                    relief='flat',
-                    font=('Segoe UI', 8))
+            # Listbox da combobox
+            style.configure('TCombobox.Listbox',
+                        background=self.colors['card_bg'],
+                        foreground=self.colors['fg'],
+                        selectbackground=self.colors['primary'],  # Item selecionado
+                        selectforeground=self.colors['bg'],
+                        borderwidth=0,
+                        relief='flat',
+                        font=('Segoe UI', 8))
 
     def create_track_controls(self, parent, track_index):
         """Cria controles para um track específico"""
         track = self.audio_tracks[track_index]
-        
+
         # Frame para controles do áudio
         track_controls = tk.Frame(parent, bg=self.colors['card_bg'])
         track_controls.pack(fill=tk.X, pady=(0, 10))
-        
+
         # Botão carregar
         load_btn = ttk.Button(
             track_controls,
@@ -1034,7 +1768,7 @@ class AudioInterpolatorApp:
             width=8
         )
         load_btn.pack(side=tk.LEFT, padx=(0, 5))
-        
+
         # Botão processar individual
         self.audio_tracks[track_index].process_btn = ttk.Button(
             track_controls,
@@ -1044,21 +1778,21 @@ class AudioInterpolatorApp:
             width=8
         )
         self.audio_tracks[track_index].process_btn.pack(side=tk.LEFT)
-        
+
         # Info do arquivo
         self.create_info_display(parent, track_index)
-        
+
         # Controle de ganho individual
         self.create_gain_control(parent, track_index)
-        
+
         # Botões de ação
         self.create_action_buttons(parent, track_index)
-    
+
     def create_info_display(self, parent, track_index):
         """Cria display de informações do arquivo"""
         info_frame = tk.Frame(parent, bg=self.colors['card_bg'])
         info_frame.pack(fill=tk.X, pady=(10, 0))
-        
+
         # Labels de informação
         self.audio_tracks[track_index].info_var = tk.StringVar(value="Nenhum arquivo carregado")
         info_label = tk.Label(
@@ -1071,7 +1805,7 @@ class AudioInterpolatorApp:
             justify=tk.LEFT
         )
         info_label.pack(anchor=tk.W)
-        
+
         # Status de processamento
         self.audio_tracks[track_index].status_var = tk.StringVar(value="")
         self.audio_tracks[track_index].status_label = tk.Label(
@@ -1082,12 +1816,12 @@ class AudioInterpolatorApp:
             bg=self.colors['card_bg']
         )
         self.audio_tracks[track_index].status_label.pack(anchor=tk.W, pady=(2, 0))
-    
+
     def create_gain_control(self, parent, track_index):
         """Cria controle de ganho para um track"""
         gain_frame = tk.Frame(parent, bg=self.colors['card_bg'])
         gain_frame.pack(fill=tk.X, pady=(10, 0))
-        
+
         tk.Label(
             gain_frame,
             text="Ganho:",
@@ -1095,10 +1829,10 @@ class AudioInterpolatorApp:
             fg=self.colors['fg'],
             bg=self.colors['card_bg']
         ).pack(side=tk.LEFT)
-        
+
         # Variável de ganho
         self.audio_tracks[track_index].gain_var = tk.DoubleVar(value=0)
-        
+
         # Slider de ganho
         gain_slider = ttk.Scale(
             gain_frame,
@@ -1110,7 +1844,7 @@ class AudioInterpolatorApp:
             length=180
         )
         gain_slider.pack(side=tk.LEFT, padx=(10, 5), fill=tk.X, expand=True)
-        
+
         # Label do valor
         self.audio_tracks[track_index].gain_label = tk.Label(
             gain_frame,
@@ -1121,11 +1855,11 @@ class AudioInterpolatorApp:
             width=8
         )
         self.audio_tracks[track_index].gain_label.pack(side=tk.RIGHT)
-        
+
         # Botões rápidos de ganho
         quick_gain_frame = tk.Frame(parent, bg=self.colors['card_bg'])
         quick_gain_frame.pack(fill=tk.X, pady=(5, 0))
-        
+
         for db in [-6, 0, 6]:
             btn = ttk.Button(
                 quick_gain_frame,
@@ -1135,12 +1869,12 @@ class AudioInterpolatorApp:
                 width=6
             )
             btn.pack(side=tk.LEFT, padx=(0, 5))
-    
+
     def create_action_buttons(self, parent, track_index):
         """Cria botões de ação para um track"""
         action_frame = tk.Frame(parent, bg=self.colors['card_bg'])
         action_frame.pack(fill=tk.X, pady=(10, 0))
-        
+
         # Botão reproduzir original
         play_orig_btn = ttk.Button(
             action_frame,
@@ -1150,7 +1884,7 @@ class AudioInterpolatorApp:
             width=8
         )
         play_orig_btn.pack(side=tk.LEFT, padx=(0, 5))
-        
+
         # Botão reproduzir sintetizado
         play_synth_btn = ttk.Button(
             action_frame,
@@ -1160,7 +1894,7 @@ class AudioInterpolatorApp:
             width=8
         )
         play_synth_btn.pack(side=tk.LEFT)
-        
+
         # Botão salvar
         save_btn = ttk.Button(
             action_frame,
@@ -1170,20 +1904,20 @@ class AudioInterpolatorApp:
             width=6
         )
         save_btn.pack(side=tk.RIGHT)
-    
+
     def setup_axes(self, ax, show_labels=True):
         """Configura eixos do matplotlib com tema escuro"""
         ax.set_facecolor(self.matplotlib_colors['bg'])
         ax.tick_params(colors=self.matplotlib_colors['fg'], labelsize=8)
-        
+
         # Configura spines (bordas) mais finas
         for spine in ax.spines.values():
             spine.set_color(self.matplotlib_colors['spines'])
             spine.set_linewidth(0.8)
-        
+
         # Grid mais sutil
         ax.grid(True, color=self.matplotlib_colors['grid'], alpha=0.2, linestyle='--', linewidth=0.5)
-        
+
         # Labels com fonte menor - APENAS SE show_labels=True
         if show_labels:
             ax.set_xlabel('Tempo (s)', color=self.matplotlib_colors['fg'], fontsize=9)
@@ -1195,11 +1929,11 @@ class AudioInterpolatorApp:
             # Remove alguns ticks também para limpar mais
             #ax.set_xticklabels([])
             ax.set_yticklabels([])
-        
+
         # Configura ticks do eixo Y mais compactos
         ax.set_yticks([-1.0, -0.5, 0, 0.5, 1.0])
         ax.set_yticklabels(['-1.0', '-0.5', '0', '0.5', '1.0'], fontsize=8)
-        
+
         # Para estado vazio, configuramos limites razoáveis
         #ax.set_xlim(0, 1)
         ax.set_ylim(-1.05, 1.05)
@@ -1213,14 +1947,14 @@ class AudioInterpolatorApp:
                 self.slider_labels['grão'].config(text=f"{self.grain_duration}ms")
         except Exception as e:
             print(f"Erro ao atualizar grão: {e}")
-    
+
     def on_overlap_change(self, value):
         """Atualiza quando overlap muda"""
         self.overlap = float(value) / 100.0
         # Atualiza label no grid
         if hasattr(self, 'slider_labels') and 'overlap' in self.slider_labels:
             self.slider_labels['overlap'].config(text=f"{float(value):.0f}%")
-    
+
     def on_partials_change(self, value):
         """Atualiza quando número de parciais muda"""
         try:
@@ -1236,7 +1970,7 @@ class AudioInterpolatorApp:
 
         except Exception as e:
             print(f"Erro ao atualizar parciais: {e}")
-    
+
     def on_partials_entry_change(self):
         """Atualiza quando número de parciais é alterado via entry"""
         try:
@@ -1246,28 +1980,18 @@ class AudioInterpolatorApp:
             self.num_partials = num_partials
             self.partials_var.set(num_partials)
             self.partials_label.config(text=f"{num_partials} parciais")
-            
+
             # Atualiza o processador
             self.grain_processor.set_num_partials(num_partials)
-            
+
         except Exception as e:
             print(f"Erro ao atualizar parciais via entry: {e}")
-    
+
     def set_partials(self, num_partials):
         """Define número específico de parciais"""
         self.partials_var.set(num_partials)
         self.on_partials_change(num_partials)
-    
-    def on_interpolation_mode_change(self, event=None):
-        """Atualiza quando modo de interpolação muda"""
-        self.interpolation_mode = self.mode_var.get()
-        
-        # Mostra/oculta controles de conexão conforme o modo
-        if "Conexão" in self.interpolation_mode:
-            self.connection_frame.pack(fill=tk.X, pady=(10, 0))
-        else:
-            self.connection_frame.pack_forget()
-    
+
     def on_interpolation_change(self, value):
         """Atualiza quando fator de interpolação muda"""
         try:
@@ -1284,7 +2008,7 @@ class AudioInterpolatorApp:
 
         except Exception as e:
             print(f"Erro ao atualizar interpolação: {e}")
-    
+
     def on_interpolation_entry_change(self):
         """Atualiza quando fator de interpolação é alterado via entry"""
         try:
@@ -1361,7 +2085,7 @@ class AudioInterpolatorApp:
             self.random_label.config(text=f"{self.randomness_factor:.1f}%")
         except Exception as e:
             print(f"Erro ao atualizar aleatoriedade: {e}")
-    
+
     def on_randomness_entry_change(self):
         """Atualiza quando fator de aleatoriedade é alterado via entry"""
         try:
@@ -1371,7 +2095,7 @@ class AudioInterpolatorApp:
             self.random_label.config(text=f"{self.randomness_factor:.1f}%")
         except Exception as e:
             print(f"Erro ao atualizar aleatoriedade via entry: {e}")
-    
+
     def on_connection_grain_change(self):
         """Atualiza quando duração do grão de conexão muda"""
         try:
@@ -1380,42 +2104,42 @@ class AudioInterpolatorApp:
             self.connection_var.set(self.connection_grain_duration)
         except Exception as e:
             print(f"Erro ao atualizar grão de conexão: {e}")
-    
+
     def on_track_gain_change(self, track_index, value):
         """Atualiza ganho de um track específico"""
         try:
             gain_db = float(value)
             gain_linear = 10 ** (gain_db / 20.0)
-            
+
             track = self.audio_tracks[track_index]
             track.gain = gain_linear
-            
+
             # Aplica ganho ao áudio sintetizado se existir
             if track.synthesized_raw is not None:
                 synthesized_with_gain = track.synthesized_raw * gain_linear
-                
+
                 # Verifica clipping
                 max_amplitude = np.max(np.abs(synthesized_with_gain))
                 if max_amplitude > 1.0:
                     synthesized_with_gain = np.tanh(synthesized_with_gain * 0.8) * 1.2
-                
+
                 track.synthesized = synthesized_with_gain
-                
+
                 # Atualiza gráfico
                 self.plot_track_waveform(track_index)
-            
+
             # Atualiza label
             track.gain_label.config(text=f"{gain_db:.1f} dB")
-            
+
         except Exception as e:
             print(f"Erro ao aplicar ganho: {e}")
-    
+
     def set_track_gain(self, track_index, db_value):
         """Define ganho específico para um track"""
         track = self.audio_tracks[track_index]
         track.gain_var.set(db_value)
         self.on_track_gain_change(track_index, db_value)
-    
+
     def load_audio(self, track_index):
         """Carrega arquivo de áudio para track específico"""
         file_path = filedialog.askopenfilename(
@@ -1483,30 +2207,30 @@ class AudioInterpolatorApp:
 
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao carregar áudio: {str(e)}")
-    
+
     def process_track(self, track_index):
         """Processa síntese para track específico"""
         track = self.audio_tracks[track_index]
-        
+
         if track.original is None:
             messagebox.showwarning("Aviso", f"Carregue um áudio para {track.name} primeiro!")
             return
-        
+
         # Verifica se já está processando
         if track.processing:
             return
-        
+
         # Marca como processando
         track.processing = True
         track.status_var.set("Processando...")
         track.status_label.config(fg=self.colors['warning'])
-        
+
         # Desabilita botão de processar
         track.process_btn.config(state='disabled')
-        
+
         # Atualiza status com número de parciais
         self.status_var.set(f"Processando {track.name} com {self.num_partials} parciais...")
-        
+
         # Processa em thread separada
         thread = threading.Thread(
             target=self._process_track_thread,
@@ -1514,13 +2238,13 @@ class AudioInterpolatorApp:
         )
         thread.daemon = True
         thread.start()
-    
+
     def process_all_tracks(self):
         """Processa síntese para todos os tracks"""
         for i in range(len(self.audio_tracks)):
             if self.audio_tracks[i].original is not None:
                 self.process_track(i)
-    
+
     def _process_track_thread(self, track_index):
         """Thread para processamento de um track"""
         try:
@@ -1528,7 +2252,7 @@ class AudioInterpolatorApp:
             grain_duration = self.grain_duration
             overlap = self.overlap
             preserve_dynamics = self.dynamic_var.get()
-            
+
             # Extrai grãos e calcula perfil dinâmico
             grains, dynamic_profile, hop_size = self.grain_processor.extract_grains_with_dynamic_profile(
                 track.original,
@@ -1537,7 +2261,7 @@ class AudioInterpolatorApp:
                 overlap
             )
             track.grains = grains
-            
+
             # Armazena perfil dinâmico
             if preserve_dynamics:
                 track.dynamic_profile = dynamic_profile
@@ -1548,46 +2272,46 @@ class AudioInterpolatorApp:
             else:
                 track.dynamic_profile = None
                 dynamic_profile_normalized = None
-            
+
             synthesized_grains = []
             envelopes = []
             grain_samples = int(grain_duration * track.sample_rate / 1000)
-            
+
             # Cria envelope
             envelope = self.grain_processor.create_tukey_envelope(grain_samples, alpha=0.4)
-            
+
             # Limpa arrays de análise espectral
             track.grain_frequencies = []
             track.grain_magnitudes = []
             track.grain_phases = []
-            
+
             # Processa cada grão
             total_grains = len(grains)
             for i, grain in enumerate(grains):
                 # Aplica envelope
                 enveloped_grain = grain * envelope
-                
+
                 # Obtém nível dinâmico
                 grain_level = dynamic_profile_normalized[i] if dynamic_profile_normalized is not None and i < len(dynamic_profile_normalized) else 0.5
-                
+
                 # Analisa grão
                 frequencies, magnitudes, phases = self.grain_processor.analyze_grain_with_adaptive_threshold(
                     enveloped_grain,
                     track.sample_rate,
                     grain_level
                 )
-                
+
                 # Armazena análise espectral para uso em interpolação
                 track.grain_frequencies.append(frequencies)
                 track.grain_magnitudes.append(magnitudes)
                 track.grain_phases.append(phases)
-                
+
                 # Determina nível alvo
                 if preserve_dynamics and dynamic_profile_normalized is not None:
                     target_level = dynamic_profile_normalized[i] if i < len(dynamic_profile_normalized) else 0.5
                 else:
                     target_level = 0.5
-                
+
                 # Sintetiza grão
                 synthesized_grain = self.grain_processor.synthesize_grain_with_dynamic_scaling(
                     frequencies,
@@ -1597,16 +2321,16 @@ class AudioInterpolatorApp:
                     track.sample_rate,
                     target_level
                 )
-                
+
                 synthesized_grain = synthesized_grain * envelope
                 synthesized_grains.append(synthesized_grain)
                 envelopes.append(envelope)
-                
+
                 # Atualiza progresso a cada 10%
                 if total_grains > 0 and i % max(1, total_grains // 10) == 0:
                     progress = (i + 1) / total_grains * 100
                     self.audio_queue.put(('progress', track_index, progress))
-            
+
             # Reconstrói áudio
             if preserve_dynamics:
                 synthesized_raw = self.grain_processor.reconstruct_audio_with_dynamics(
@@ -1624,36 +2348,36 @@ class AudioInterpolatorApp:
                     len(track.original),
                     None
                 )
-            
+
             # Aplica filtro passa-baixas
             if len(synthesized_raw) > 100:
                 nyquist = track.sample_rate / 2
                 cutoff = min(nyquist * 0.85, 16000)
                 b, a = signal.butter(2, cutoff / nyquist, 'low')
                 synthesized_raw = signal.filtfilt(b, a, synthesized_raw)
-            
+
             # Normalização automática
             if self.normalize_var.get():
                 max_val = np.max(np.abs(synthesized_raw))
                 if max_val > 0:
                     synthesized_raw = synthesized_raw / max_val * 0.9
-            
+
             # Salva versão raw
             track.synthesized_raw = synthesized_raw
-            
+
             # Aplica ganho atual
             gain_linear = track.gain
             synthesized_with_gain = synthesized_raw * gain_linear
-            
+
             # Aplica limiter se necessário
             max_amplitude = np.max(np.abs(synthesized_with_gain))
             if max_amplitude > 1.0:
                 synthesized_with_gain = np.tanh(synthesized_with_gain * 0.8) * 1.2
-            
+
             track.synthesized = synthesized_with_gain
             track.synthesized_grains = synthesized_grains
             track.grain_envelopes = envelopes
-            
+
             # Envia resultado para a fila
             self.audio_queue.put(('done', track_index, synthesized_with_gain))
 
@@ -1668,7 +2392,7 @@ class AudioInterpolatorApp:
                 'dynamic_preservation': preserve_dynamics,
                 'normalize': self.normalize_var.get()
             }
-            
+
         except Exception as e:
             self.audio_queue.put(('error', track_index, str(e)))
 
@@ -1738,295 +2462,6 @@ class AudioInterpolatorApp:
             print(f"Erro ao aplicar dinâmica à interpolação: {e}")
             return interpolated_audio
 
-    def _generate_interpolation_thread(self):
-        """Thread para geração da interpolação"""
-        try:
-            # Obtém grãos sintetizados de ambos os áudios
-            track1 = self.audio_tracks[0]
-            track2 = self.audio_tracks[1]
-
-            # VERIFICAÇÃO DE TAXAS DE AMOSTRAGEM
-            if track1.sample_rate != track2.sample_rate:
-                warning_msg = (
-                    f"⚠️ AVISO: Taxas de amostragem diferentes!\n"
-                    f"Áudio 1: {track1.sample_rate} Hz\n"
-                    f"Áudio 2: {track2.sample_rate} Hz\n"
-                    f"A interpolação será feita em {track1.sample_rate} Hz (taxa do primeiro áudio).\n\n"
-                    f"Implicações:\n"
-                    f"• O áudio 2 será reproduzido em velocidade diferente\n"
-                    f"• Pode haver alteração no timbre, altura e duração"
-                )
-                # Envia aviso para a interface
-                self.audio_queue.put(('warning', warning_msg))
-
-            grains1 = track1.synthesized_grains
-            grains2 = track2.synthesized_grains
-
-            if not grains1 or not grains2:
-                raise ValueError("Ambos os áudios precisam ser processados primeiro!")
-
-            # Verifica se temos dados espectral para conexão
-            has_spectral_data = (len(track1.grain_frequencies) > 0 and
-                                len(track2.grain_frequencies) > 0)
-
-            # Para Granular Simples
-            if "Granular Simples" in self.interpolation_mode:
-                # Fator de interpolação (0-1)
-                alpha = self.interpolation_factor / 100.0
-
-                # Número de grãos disponíveis
-                num_grains1 = len(grains1)
-                num_grains2 = len(grains2)
-
-                # Para qualquer fator (incluindo 0% e 100%)
-                grains_from_1 = int(num_grains1 * (1 - alpha))
-                grains_from_2 = int(num_grains2 * alpha)
-
-                # Ajusta casos extremos
-                if alpha == 0.0:  # 100% áudio 1
-                    grains_from_1 = num_grains1
-                    grains_from_2 = 0
-                elif alpha == 1.0:  # 100% áudio 2
-                    grains_from_1 = 0
-                    grains_from_2 = num_grains2
-
-                total_grains = grains_from_1 + grains_from_2
-
-                # Seleciona grãos distribuídos uniformemente
-                if grains_from_1 > 0:
-                    step1 = max(1, num_grains1 // grains_from_1)
-                    indices1 = list(range(0, num_grains1, step1))[:grains_from_1]
-                    selected_grains1 = [grains1[i] for i in indices1]
-                else:
-                    selected_grains1 = []
-
-                if grains_from_2 > 0:
-                    step2 = max(1, num_grains2 // grains_from_2)
-                    indices2 = list(range(0, num_grains2, step2))[:grains_from_2]
-                    selected_grains2 = [grains2[i] for i in indices2]
-                else:
-                    selected_grains2 = []
-
-                if total_grains == 0:
-                    raise ValueError("Nenhum grão selecionado para interpolação!")
-
-                # Encontra o tamanho mais comum entre os grãos
-                grain_lengths1 = [len(g) for g in grains1]
-                grain_lengths2 = [len(g) for g in grains2]
-                all_grain_lengths = grain_lengths1 + grain_lengths2
-
-                if not all_grain_lengths:
-                    raise ValueError("Nenhum grão com tamanho válido!")
-
-                # Usa o tamanho mais comum
-                from collections import Counter
-                length_counts = Counter(all_grain_lengths)
-                standard_grain_length = length_counts.most_common(1)[0][0]
-
-                # Cria sequência de grãos
-                sequence = []
-                idx1 = 0
-                idx2 = 0
-
-                # Determina qual áudio tem mais grãos selecionados
-                if grains_from_1 >= grains_from_2:
-                    # Mais grãos do áudio 1
-                    if grains_from_2 > 0:
-                        step = max(1, grains_from_1 // grains_from_2)
-
-                        for i in range(total_grains):
-                            if i % (step + 1) < step and idx1 < len(selected_grains1):
-                                # Pega grão do áudio 1
-                                grain = selected_grains1[idx1]
-                                sequence.append(grain)
-                                idx1 += 1
-                            elif idx2 < len(selected_grains2):
-                                # Pega grão do áudio 2
-                                grain = selected_grains2[idx2]
-                                sequence.append(grain)
-                                idx2 += 1
-                            elif idx1 < len(selected_grains1):
-                                # Se acabou áudio 2, pega do áudio 1
-                                grain = selected_grains1[idx1]
-                                sequence.append(grain)
-                                idx1 += 1
-                    else:
-                        # Só tem áudio 1
-                        for grain in selected_grains1:
-                            sequence.append(grain)
-                else:
-                    # Mais grãos do áudio 2
-                    if grains_from_1 > 0:
-                        step = max(1, grains_from_2 // grains_from_1)
-
-                        for i in range(total_grains):
-                            if i % (step + 1) < step and idx2 < len(selected_grains2):
-                                # Pega grão do áudio 2
-                                grain = selected_grains2[idx2]
-                                sequence.append(grain)
-                                idx2 += 1
-                            elif idx1 < len(selected_grains1):
-                                # Pega grão do áudio 1
-                                grain = selected_grains1[idx1]
-                                sequence.append(grain)
-                                idx1 += 1
-                            elif idx2 < len(selected_grains2):
-                                # Se acabou áudio 1, pega do áudio 2
-                                grain = selected_grains2[idx2]
-                                sequence.append(grain)
-                                idx2 += 1
-                    else:
-                        # Só tem áudio 2
-                        for grain in selected_grains2:
-                            sequence.append(grain)
-                # Verifica se temos grãos suficientes
-                if len(sequence) == 0:
-                    raise ValueError("Nenhum grão válido após padronização!")
-
-                # Aplica aleatoriedade (se configurada)
-                if self.randomness_factor > 0 and len(sequence) > 1:
-                    num_swaps = int(len(sequence) * (self.randomness_factor / 200.0))
-                    for _ in range(num_swaps):
-                        i, j = random.randint(0, len(sequence) - 1), random.randint(0, len(sequence) - 1)
-                        if i != j:
-                            sequence[i], sequence[j] = sequence[j], sequence[i]
-
-                # Reconstrói áudio
-                grain_length = standard_grain_length
-                hop_size = int(grain_length * (1 - self.overlap))
-
-                # CORREÇÃO: Para 0% ou 100%, usa o comprimento original
-                if alpha == 0.0 and track1.original is not None:
-                    total_length = len(track1.original)
-                elif alpha == 1.0 and track2.original is not None:
-                    total_length = len(track2.original)
-                else:
-                    total_length = (len(sequence) - 1) * hop_size + grain_length
-
-                interpolated = np.zeros(total_length)
-
-                # Cria envelope
-                envelope = self.grain_processor.create_tukey_envelope(grain_length, alpha=0.4)
-
-                for i, grain in enumerate(sequence):
-                    start = i * hop_size
-                    end = start + grain_length
-
-                    if start >= total_length:
-                        break
-
-                    # Verifica tamanho
-                    if len(grain) != len(envelope):
-                        # Ajusta o grão para o tamanho do envelope
-                        if len(grain) < len(envelope):
-                            padded = np.zeros(len(envelope))
-                            padded[:len(grain)] = grain
-                            grain = padded
-                        else:
-                            grain = grain[:len(envelope)]
-
-                    enveloped_grain = grain * envelope
-
-                    if end > total_length:
-                        end = total_length
-                        enveloped_grain = enveloped_grain[:end-start]
-
-                    interpolated[start:end] += enveloped_grain
-
-                    # Atualiza progresso
-                    if len(sequence) > 0 and i % max(1, len(sequence) // 10) == 0:
-                        progress = (i + 1) / len(sequence) * 100
-                        self.audio_queue.put(('interpolation_progress', progress))
-
-                # Aplica configurações
-                max_val = np.max(np.abs(interpolated))
-
-                # Normalização automática
-                if self.normalize_var.get() and max_val > 0:
-                    interpolated = interpolated / max_val * 0.9
-                elif max_val > 1.0:
-                    interpolated = interpolated / max_val * 0.95
-
-                # Preservar dinâmica
-                if self.dynamic_var.get():
-                    interpolated = self._apply_dynamics_to_interpolation(
-                        interpolated, track1, track2, self.interpolation_factor
-                    )
-
-                # Aplica ganho da interpolação
-                interpolated = interpolated * self.interpolation_gain_linear
-
-                # Limiter final
-                max_amp = np.max(np.abs(interpolated))
-                if max_amp > 1.0:
-                    interpolated = np.tanh(interpolated * 0.8) * 1.2
-
-                self.interpolated_audio = interpolated
-                # GUARDA O ÁUDIO RAW (SEM GANHO) PARA APLICAÇÕES POSTERIORES DE GANHO
-                self.interpolated_audio_raw = interpolated.copy()
-
-                # Atualiza interface
-                self.audio_queue.put(('interpolation_done', interpolated))
-
-            # Modo com Conexão de Grãos
-            elif "Conexão" in self.interpolation_mode and has_spectral_data:
-                # Fator de interpolação (0-1)
-                alpha = self.interpolation_factor / 100.0
-
-                # Usa o áudio sintetizado completo
-                if track1.synthesized is None or track2.synthesized is None:
-                    raise ValueError("Ambos os áudios precisam ser sintetizados!")
-
-                # Determina comprimento alvo
-                len1 = len(track1.synthesized)
-                len2 = len(track2.synthesized)
-
-                if alpha == 0.0:
-                    target_length = len1
-                elif alpha == 1.0:
-                    target_length = len2
-                else:
-                    target_length = int((1 - alpha) * len1 + alpha * len2)
-
-                # Redimensiona ambos os áudios
-                audio1_resampled = self._resample_audio(track1.synthesized, target_length)
-                audio2_resampled = self._resample_audio(track2.synthesized, target_length)
-
-                # Interpolação linear simples
-                interpolated = (1 - alpha) * audio1_resampled + alpha * audio2_resampled
-
-                # Aplica configurações
-                max_val = np.max(np.abs(interpolated))
-
-                if self.normalize_var.get() and max_val > 0:
-                    interpolated = interpolated / max_val * 0.9
-                elif max_val > 1.0:
-                    interpolated = interpolated / max_val * 0.95
-
-                # Aplica ganho da interpolação
-                interpolated = interpolated * self.interpolation_gain_linear
-
-                # Limiter final
-                max_amp = np.max(np.abs(interpolated))
-                if max_amp > 1.0:
-                    interpolated = np.tanh(interpolated * 0.8) * 1.2
-
-                self.interpolated_audio = interpolated
-                # GUARDA O ÁUDIO RAW (SEM GANHO)
-                self.interpolated_audio_raw = interpolated.copy()
-
-                # Atualiza interface
-                self.audio_queue.put(('interpolation_done', interpolated))
-
-            else:
-                raise ValueError("Modo de interpolação não suportado ou dados insuficientes!")
-
-        except Exception as e:
-            import traceback
-            print(f"Erro detalhado na interpolação: {str(e)}")
-            print(traceback.format_exc())
-            self.audio_queue.put(('error', -1, str(e)))
-
     def _resample_audio(self, audio, target_length):
         """Redimensiona áudio para comprimento alvo"""
         if len(audio) == target_length:
@@ -2044,7 +2479,7 @@ class AudioInterpolatorApp:
         """Processa os áudios e depois gera a interpolação"""
         # Processa ambos os áudios
         self.process_all_tracks()
-        
+
         # Verifica periodicamente se o processamento terminou
         def check_processing():
             all_processed = True
@@ -2052,17 +2487,17 @@ class AudioInterpolatorApp:
                 if track.processing:
                     all_processed = False
                     break
-            
+
             if all_processed:
                 # Todos processados, agora gera interpolação
                 self.root.after(500, self.generate_interpolation)
             else:
                 # Ainda processando, verifica novamente em 100ms
                 self.root.after(100, check_processing)
-        
+
         # Inicia verificação
         self.root.after(500, check_processing)
-    
+
     def generate_interpolation(self):
         """Gera áudio interpolado com base nas configurações"""
         if self.interpolation_processing:
@@ -2158,7 +2593,7 @@ class AudioInterpolatorApp:
     def plot_track_waveform(self, track_index, is_original=False):
         """Plota forma de onda de um track com duração total"""
         track = self.audio_tracks[track_index]
-        
+
         if is_original:
             ax = self.ax_original[track_index]
             audio = track.original
@@ -2167,19 +2602,19 @@ class AudioInterpolatorApp:
             ax = self.ax_synthesized[track_index]
             audio = track.synthesized
             title_suffix = " - Sintetizado"
-        
+
         ax.clear()
-        
+
         if audio is not None and len(audio) > 0:
             # Calcula duração total em segundos
             total_duration = len(audio) / track.sample_rate
-            
+
             # Cria array de tempo para todo o áudio
             time_array = np.linspace(0, total_duration, len(audio))
-            
+
             # Para áudios muito longos, usamos downsampling para visualização
             max_display_points = 5000  # Limite de pontos para visualização
-            
+
             if len(audio) > max_display_points:
                 # Downsampling para visualização
                 step = len(audio) // max_display_points
@@ -2188,34 +2623,34 @@ class AudioInterpolatorApp:
             else:
                 audio_display = audio
                 time_display = time_array
-            
+
             # Encontra amplitude máxima
             max_abs = np.max(np.abs(audio_display))
-            
+
             # Plota forma de onda
             linewidth = 0.5 if len(audio_display) > 20000 else 0.8
-            ax.plot(time_display, audio_display, color=track.color, 
+            ax.plot(time_display, audio_display, color=track.color,
                    linewidth=linewidth, alpha=0.8)
-            
+
             # Linha de referência zero
-            ax.axhline(y=0, color=self.matplotlib_colors['fg'], 
+            ax.axhline(y=0, color=self.matplotlib_colors['fg'],
                       linestyle='-', alpha=0.2, linewidth=0.5)
-            
+
             # Linhas de clipping se necessário
             if max_abs > 0.95:
-                ax.axhline(y=1.0, color=self.colors['error'], 
+                ax.axhline(y=1.0, color=self.colors['error'],
                           linestyle='--', alpha=0.4, linewidth=0.5)
-                ax.axhline(y=-1.0, color=self.colors['error'], 
+                ax.axhline(y=-1.0, color=self.colors['error'],
                           linestyle='--', alpha=0.4, linewidth=0.5)
-            
+
             # Configura limites dos eixos - MOSTRANDO O ÁUDIO INTEIRO
             ax.set_xlim(0, total_duration)
-            
+
             # Ajusta eixo Y
             y_margin = 0.05
             y_max = min(1.0, max_abs + y_margin)
             ax.set_ylim(-y_max, y_max)
-            
+
             # Configura ticks do eixo X de forma inteligente
             # Calcula intervalos apropriados baseados na duração total
             if total_duration > 60:  # Mais de 1 minuto
@@ -2226,10 +2661,10 @@ class AudioInterpolatorApp:
                 interval = 0.5  # A cada 0.5 segundos
             else:  # Menos de 2 segundos
                 interval = 0.1  # A cada 0.1 segundos
-            
+
             x_ticks = np.arange(0, total_duration + interval/2, interval)
             ax.set_xticks(x_ticks)
-            
+
             # Formata os labels do eixo X
             if total_duration > 60:
                 # Formato MM:SS para áudios longos
@@ -2240,14 +2675,14 @@ class AudioInterpolatorApp:
             else:
                 # Segundos com uma casa decimal
                 tick_labels = [f"{t:.1f}" for t in x_ticks]
-            
+
             ax.set_xticklabels(tick_labels, fontsize=8)
-            
+
             # Configura ticks do eixo Y
             y_ticks = np.linspace(-y_max, y_max, 5)
             ax.set_yticks(y_ticks)
             ax.set_yticklabels([f'{y:.1f}' for y in y_ticks], fontsize=8)
-            
+
         else:
             ax.text(0.5, 0.5, "Nenhum áudio\ncarregado" if is_original else "Não processado",
                    horizontalalignment='center',
@@ -2256,32 +2691,32 @@ class AudioInterpolatorApp:
                    color=self.matplotlib_colors['fg'],
                    fontsize=10,
                    alpha=0.5)
-            
+
             ax.set_xlim(0, 1)
             ax.set_ylim(-1.05, 1.05)
             ax.set_xticks([0, 0.5, 1.0])
             ax.set_xticklabels(['0.0', '0.5', '1.0'], fontsize=8)
             ax.set_yticks([-1.0, -0.5, 0, 0.5, 1.0])
             ax.set_yticklabels(['-1.0', '-0.5', '0', '0.5', '1.0'], fontsize=8)
-        
+
         # Atualiza título
         if audio is not None and len(audio) > 0:
             total_duration = len(audio) / track.sample_rate
             duration_text = f" ({total_duration:.2f}s)"
         else:
             duration_text = ""
-        
-        ax.set_title(f"{track.name}{title_suffix}{duration_text}", 
+
+        ax.set_title(f"{track.name}{title_suffix}{duration_text}",
                     color=self.matplotlib_colors['fg'],
                     fontsize=11,
                     pad=8)
-        
+
         # Reconfigura estilo básico
         #self.setup_axes(ax, show_labels=False)  # SEMPRE False conforme solicitado
-        
+
         # Atualiza canvas
         self.canvas.draw()
-    
+
     def plot_interpolated_waveform(self, audio):
         """Plota forma de onda do áudio interpolado"""
         ax = self.ax_interpolated
@@ -2295,10 +2730,10 @@ class AudioInterpolatorApp:
             # Assume sample rate do primeiro áudio
             sample_rate = self.audio_tracks[0].sample_rate
             total_duration = len(audio) / sample_rate
-            
+
             # Cria array de tempo para todo o áudio
             time_array = np.linspace(0, total_duration, len(audio))
-            
+
             # Downsampling para visualização se necessário
             max_display_points = 5000
             if len(audio) > max_display_points:
@@ -2308,30 +2743,30 @@ class AudioInterpolatorApp:
             else:
                 audio_display = audio
                 time_display = time_array
-            
+
             max_abs = np.max(np.abs(audio_display))
-            
+
             # Plota com cor específica para interpolação
             linewidth = 0.5 if len(audio_display) > 20000 else 0.8
-            ax.plot(time_display, audio_display, color=self.colors['interpolation'], 
+            ax.plot(time_display, audio_display, color=self.colors['interpolation'],
                    linewidth=linewidth, alpha=0.8)
-            
-            ax.axhline(y=0, color=self.matplotlib_colors['fg'], 
+
+            ax.axhline(y=0, color=self.matplotlib_colors['fg'],
                       linestyle='-', alpha=0.2, linewidth=0.5)
-            
+
             if max_abs > 0.95:
-                ax.axhline(y=1.0, color=self.colors['error'], 
+                ax.axhline(y=1.0, color=self.colors['error'],
                           linestyle='--', alpha=0.4, linewidth=0.5)
-                ax.axhline(y=-1.0, color=self.colors['error'], 
+                ax.axhline(y=-1.0, color=self.colors['error'],
                           linestyle='--', alpha=0.4, linewidth=0.5)
-            
+
             # MOSTRANDO O ÁUDIO INTEIRO
             ax.set_xlim(0, total_duration)
-            
+
             y_margin = 0.05
             y_max = min(1.0, max_abs + y_margin)
             ax.set_ylim(-y_max, y_max)
-            
+
             # Configura ticks do eixo X
             if total_duration > 60:
                 interval = 10
@@ -2349,14 +2784,14 @@ class AudioInterpolatorApp:
                 interval = 0.1
                 x_ticks = np.arange(0, total_duration + interval/2, interval)
                 tick_labels = [f"{t:.1f}" for t in x_ticks]
-            
+
             ax.set_xticks(x_ticks)
             ax.set_xticklabels(tick_labels, fontsize=8)
-            
+
             y_ticks = np.linspace(-y_max, y_max, 5)
             ax.set_yticks(y_ticks)
             ax.set_yticklabels([f'{y:.1f}' for y in y_ticks], fontsize=8)
-            
+
         else:
             ax.text(0.5, 0.5, "Nenhuma interpolação\ngerada",
                    horizontalalignment='center',
@@ -2365,60 +2800,60 @@ class AudioInterpolatorApp:
                    color=self.matplotlib_colors['fg'],
                    fontsize=10,
                    alpha=0.5)
-            
+
             ax.set_xlim(0, 1)
             ax.set_ylim(-1.05, 1.05)
             ax.set_xticks([0, 0.5, 1.0])
             ax.set_xticklabels(['0.0', '0.5', '1.0'], fontsize=8)
             ax.set_yticks([-1.0, -0.5, 0, 0.5, 1.0])
             ax.set_yticklabels(['-1.0', '-0.5', '0', '0.5', '1.0'], fontsize=8)
-        
+
         # Título com formato solicitado
         title = self.get_interpolation_title()
-        ax.set_title(title, 
+        ax.set_title(title,
                     color=self.matplotlib_colors['fg'],
                     fontsize=12,
                     pad=8)
-        
+
         #self.setup_axes(ax, show_labels=True)
         self.canvas.draw()
-    
+
     def get_interpolation_title(self):
         """Gera título formatado para a interpolação conforme solicitado"""
         if self.interpolated_audio is None:
             return "Áudio Interpolado"
-        
+
         sample_rate = self.audio_tracks[0].sample_rate
         total_duration = len(self.interpolated_audio) / sample_rate
-        
+
         # Base do título
         title_parts = [f"{self.interpolation_factor:.0f}"]
-        
+
         # Adiciona aleatoriedade
         title_parts.append(f"{self.randomness_factor:.0f}")
-        
+
         # Adiciona duração do grão
         title_parts.append(f"{self.grain_duration}")
-        
+
         # Se modo conexão, adiciona duração do grão de conexão
         if "Conexão" in self.interpolation_mode:
             title_parts.append(f"{self.connection_grain_duration}")
-        
+
         # Adiciona quantidade de parciais
         title_parts.append(f"{self.num_partials}")
-        
+
         # Adiciona duração total
         title_parts.append(f"{total_duration:.1f}s")
-        
+
         # Junta tudo com "-"
         return "Variação " + "-".join(title_parts)
-    
+
     def play_interpolation(self):
         """Reproduz áudio interpolado"""
         if self.interpolated_audio is None:
             messagebox.showwarning("Aviso", "Gere uma interpolação primeiro!")
             return
-        
+
         try:
             sd.stop()
             sample_rate = self.audio_tracks[0].sample_rate
@@ -2427,124 +2862,124 @@ class AudioInterpolatorApp:
             self.status_var.set(f"Reproduzindo áudio interpolado ({duration:.1f}s)...")
         except Exception as e:
             self.status_var.set(f"Erro na reprodução: {str(e)}")
-    
+
     def save_interpolation(self):
         """Salva áudio interpolado"""
         if self.interpolated_audio is None:
             messagebox.showwarning("Aviso", "Gere uma interpolação primeiro!")
             return
-        
+
         # Usa o título formatado como base para o nome do arquivo
         title = self.get_interpolation_title().replace("Áudio Interpolado: ", "")
         default_name = f"interpolacao_{title.replace('-', '_')}.wav"
-        
+
         file_path = filedialog.asksaveasfilename(
             defaultextension=".wav",
             filetypes=[("Arquivos WAV", "*.wav"), ("Arquivos FLAC", "*.flac")],
             initialfile=default_name
         )
-        
+
         if file_path:
             try:
                 audio_to_save = self.interpolated_audio
                 sample_rate = self.audio_tracks[0].sample_rate
-                
+
                 # Garante que está no range [-1, 1]
                 max_val = np.max(np.abs(audio_to_save))
                 if max_val > 1.0:
                     audio_to_save = audio_to_save / max_val * 0.99
-                
+
                 # Converte para int16
                 audio_int16 = (audio_to_save * 32767).astype(np.int16)
-                
+
                 sf.write(file_path, audio_int16, sample_rate)
-                
+
                 filename = os.path.basename(file_path)
                 self.status_var.set(f"Interpolação salva: {filename}")
-                
-                messagebox.showinfo("Sucesso", 
+
+                messagebox.showinfo("Sucesso",
                                   f"Áudio interpolado salvo com sucesso!\n"
                                   f"Arquivo: {filename}\n"
                                   f"Duração: {len(audio_to_save)/sample_rate:.2f}s")
-                
+
             except Exception as e:
                 messagebox.showerror("Erro", f"Erro ao salvar áudio: {str(e)}")
-    
+
     def play_track(self, track_index, audio_type):
         """Reproduz áudio de um track"""
         try:
             sd.stop()
-            
+
             track = self.audio_tracks[track_index]
-            
+
             if audio_type == 'original' and track.original is not None:
                 sd.play(track.original, track.sample_rate)
                 self.status_var.set(f"Reproduzindo {track.name} original ({len(track.original)/track.sample_rate:.1f}s)...")
             elif audio_type == 'synthesized' and track.synthesized is not None:
                 sd.play(track.synthesized, track.sample_rate)
                 self.status_var.set(f"Reproduzindo {track.name} sintetizado ({len(track.synthesized)/track.sample_rate:.1f}s)...")
-            
+
         except Exception as e:
             self.status_var.set(f"Erro na reprodução: {str(e)}")
-    
+
     def save_track(self, track_index):
         """Salva áudio sintetizado de um track"""
         track = self.audio_tracks[track_index]
-        
+
         if track.synthesized is None:
             messagebox.showwarning("Aviso", f"Processe {track.name} primeiro!")
             return
-        
+
         file_path = filedialog.asksaveasfilename(
             defaultextension=".wav",
             filetypes=[("Arquivos WAV", "*.wav"), ("Arquivos FLAC", "*.flac")],
             initialfile=f"{track.name.lower().replace(' ', '_')}_sintetizado.wav"
         )
-        
+
         if file_path:
             try:
                 audio_to_save = track.synthesized
-                
+
                 max_val = np.max(np.abs(audio_to_save))
                 if max_val > 1.0:
                     audio_to_save = audio_to_save / max_val * 0.99
-                
+
                 audio_int16 = (audio_to_save * 32767).astype(np.int16)
                 sf.write(file_path, audio_int16, track.sample_rate)
-                
+
                 filename = os.path.basename(file_path)
                 self.status_var.set(f"{track.name} salvo: {filename}")
-                
-                messagebox.showinfo("Sucesso", 
+
+                messagebox.showinfo("Sucesso",
                                   f"{track.name} salvo com sucesso!\n"
                                   f"Arquivo: {filename}\n"
                                   f"Duração: {len(audio_to_save)/track.sample_rate:.2f}s\n"
                                   f"Parciais usadas: {self.num_partials}")
-                
+
             except Exception as e:
                 messagebox.showerror("Erro", f"Erro ao salvar áudio: {str(e)}")
-    
+
     def monitor_queue(self):
         """Monitora a fila de processamento"""
         try:
             while True:
                 msg_type, *data = self.audio_queue.get_nowait()
-                
+
                 if msg_type == 'progress':
                     track_index, progress = data
                     track = self.audio_tracks[track_index]
                     track.status_var.set(f"Processando... {progress:.0f}%")
-                    
+
                 elif msg_type == 'done':
                     track_index, audio = data
                     track = self.audio_tracks[track_index]
                     track.processing = False
                     track.status_var.set("✓ Pronto")
                     track.status_label.config(fg=self.colors['success'])
-                    
+
                     track.process_btn.config(state='normal')
                     self.plot_track_waveform(track_index, is_original=False)
-                    
+
                     #  Habilita botões de reprodução e salvar
                     if hasattr(track, 'play_synth_btn'):
                         track.play_synth_btn.config(state='normal')
@@ -2552,7 +2987,7 @@ class AudioInterpolatorApp:
                         track.save_btn.config(state='normal')
 
                     self.status_var.set(f"{track.name} processado com {self.num_partials} parciais!")
-                    
+
                 elif msg_type == 'enable_buttons':
                     # Mensagem explícita para habilitar botões
                     track_index = data[0]
@@ -2565,7 +3000,7 @@ class AudioInterpolatorApp:
                 elif msg_type == 'interpolation_progress':
                     progress = data[0]
                     self.interp_status_var.set(f"Processando... {progress:.0f}%")
-                    
+
                 elif msg_type == 'interpolation_done':
                     audio = data[0]
                     self.interpolated_audio = audio
@@ -2578,10 +3013,10 @@ class AudioInterpolatorApp:
 
                     self.save_interp_btn.config(state='normal')
                     self.play_interp_btn.config(state='normal')
-                    
+
                     duration = len(audio) / self.audio_tracks[0].sample_rate
                     self.status_var.set(f"Interpolação gerada! Duração: {duration:.2f}s")
-                    
+
                 elif msg_type == 'error':
                     track_index, error_msg = data
                     if track_index >= 0:
@@ -2590,13 +3025,13 @@ class AudioInterpolatorApp:
                         track.status_var.set("✗ Erro")
                         track.status_label.config(fg=self.colors['error'])
                         track.process_btn.config(state='normal')
-                    
+
                     if track_index == -1:  # Erro na interpolação
                         self.interpolation_processing = False
                         self.interp_status_var.set("✗ Erro")
                         self.interp_status_label.config(fg=self.colors['error'])
                         self.generate_btn.config(state='normal')
-                    
+
                     self.status_var.set(f"Erro: {error_msg}")
                     messagebox.showerror("Erro", f"Erro: {error_msg}")
 
@@ -2609,8 +3044,9 @@ class AudioInterpolatorApp:
 
         except queue.Empty:
             pass
-        
+
         self.root.after(100, self.monitor_queue)
+
 
 # ================= PONTO DE ENTRADA =================
 def main():
