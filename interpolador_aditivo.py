@@ -553,7 +553,7 @@ class AudioInterpolatorApp:
 
         ttk.Checkbutton(
             checks_frame,
-            text="Dinâmica",
+            text="Preservar Dinâmica",
             variable=self.dynamic_var,
             style='Modern.TCheckbutton'
         ).pack(side=tk.LEFT, padx=(2, 0))
@@ -564,6 +564,14 @@ class AudioInterpolatorApp:
             variable=self.normalize_var,
             style='Modern.TCheckbutton'
         ).pack(side=tk.LEFT, padx=(2, 0))
+
+        ttk.Button(
+            checks_frame,
+            text="⏹ Parar",
+            command=self.stop_playback,
+            style='Secondary.TButton',
+            width=8
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         # 2. ÁUDIO 1
         track1_card = self.create_card(scrollable_frame, "🎵 ÁUDIO 1", top_margin=5, compact=True)
@@ -2904,6 +2912,14 @@ class AudioInterpolatorApp:
 
             except Exception as e:
                 messagebox.showerror("Erro", f"Erro ao salvar áudio: {str(e)}")
+
+    def stop_playback(self):
+        """Interrompe qualquer reprodução em andamento"""
+        try:
+            sd.stop()
+            self.status_var.set("Reprodução interrompida.")
+        except Exception as e:
+            self.status_var.set(f"Erro ao parar reprodução: {str(e)}")
 
     def play_track(self, track_index, audio_type):
         """Reproduz áudio de um track"""
