@@ -374,7 +374,7 @@ class AudioInterpolatorApp:
         self.normalize_audio = True
         
         # Configurações de interpolação
-        self.interpolation_modes = ["Granular Simples", "Com Conexão de Grãos"]
+        self.interpolation_modes = ["Granular Simples", "Com Conexão de Grãos", "Espectral Progressivo"]
         self.interpolation_mode = self.interpolation_modes[0]
         self.interpolation_factor = 50.0  # 0-100%
         self.randomness_factor = 0.0  # 0-100%
@@ -383,6 +383,10 @@ class AudioInterpolatorApp:
         self.interpolation_processing = False
         self.interpolation_gain_db = 0.0
         self.interpolation_gain_linear = 1.0
+
+        # Configurações do modo Espectral Progressivo
+        self.spectral_duration_mode = "media"   # "soma" ou "media"
+        self.spectral_blend_mode    = "selecao" # "selecao" ou "amplitude"
 
         # Criar variáveis de controle
         self.grain_var = tk.IntVar(value=self.grain_duration)
@@ -393,6 +397,8 @@ class AudioInterpolatorApp:
         self.connection_var = tk.IntVar(value=self.connection_grain_duration)
         self.interp_gain_var = tk.DoubleVar(value=self.interpolation_gain_db)
         self.mode_var = tk.StringVar(value=self.interpolation_modes[0])
+        self.spectral_duration_var = tk.StringVar(value="media")
+        self.spectral_blend_var    = tk.StringVar(value="selecao")
         self.dynamic_var = tk.BooleanVar(value=self.dynamic_preservation)
         self.normalize_var = tk.BooleanVar(value=self.normalize_audio)
         
@@ -585,11 +591,11 @@ class AudioInterpolatorApp:
         interp_card = self.create_card(scrollable_frame, "🔄 INTERPOLAÇÃO", top_margin=5, compact=True)
 
         # ===== LINHA 1: FATOR DE INTERPOLAÇÃO =====
-        interp_row1 = tk.Frame(interp_card, bg=self.colors['card_bg'])
-        interp_row1.pack(fill=tk.X, pady=(0, 3))
+        self.interp_row1 = tk.Frame(interp_card, bg=self.colors['card_bg'])
+        self.interp_row1.pack(fill=tk.X, pady=(0, 3))
 
         tk.Label(
-            interp_row1,
+            self.interp_row1,
             text="Interpolação:",
             font=('Segoe UI', 8),
             fg=self.colors['interpolation'],
@@ -597,7 +603,7 @@ class AudioInterpolatorApp:
         ).pack(side=tk.LEFT)
 
         interp_slider = ttk.Scale(
-            interp_row1,
+            self.interp_row1,
             from_=0,
             to=100,
             variable=self.interp_var,
@@ -608,7 +614,7 @@ class AudioInterpolatorApp:
         interp_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 10))
 
         self.interp_value_label = tk.Label(
-            interp_row1,
+            self.interp_row1,
             text=f"{self.interpolation_factor:.0f}%",
             font=('Segoe UI', 8, 'bold'),
             fg=self.colors['interpolation'],
@@ -618,11 +624,11 @@ class AudioInterpolatorApp:
         self.interp_value_label.pack(side=tk.RIGHT)
 
         # ===== LINHA 2: ALEATORIEDADE =====
-        interp_row2 = tk.Frame(interp_card, bg=self.colors['card_bg'])
-        interp_row2.pack(fill=tk.X, pady=(2, 3))
+        self.interp_row2 = tk.Frame(interp_card, bg=self.colors['card_bg'])
+        self.interp_row2.pack(fill=tk.X, pady=(2, 3))
 
         tk.Label(
-            interp_row2,
+            self.interp_row2,
             text="Aleatoriedade:",
             font=('Segoe UI', 8),
             fg=self.colors['fg'],
@@ -630,7 +636,7 @@ class AudioInterpolatorApp:
         ).pack(side=tk.LEFT)
 
         random_slider = ttk.Scale(
-            interp_row2,
+            self.interp_row2,
             from_=0,
             to=100,
             variable=self.random_var,
@@ -641,7 +647,7 @@ class AudioInterpolatorApp:
         random_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 10))
 
         self.random_label = tk.Label(
-            interp_row2,
+            self.interp_row2,
             text=f"{self.randomness_factor:.0f}%",
             font=('Segoe UI', 8),
             fg=self.colors['interpolation'],
@@ -682,6 +688,70 @@ class AudioInterpolatorApp:
             width=5
         )
         self.connection_label.pack(side=tk.RIGHT)
+
+        # ===== PAINEL: ESPECTRAL PROGRESSIVO =====
+        self.spectral_row = tk.Frame(interp_card, bg=self.colors['card_bg'])
+        # (visibilidade gerenciada por update_connection_controls_visibility)
+
+        # Linha A: Duração
+        spectral_dur_frame = tk.Frame(self.spectral_row, bg=self.colors['card_bg'])
+        spectral_dur_frame.pack(fill=tk.X, pady=(0, 2))
+
+        tk.Label(
+            spectral_dur_frame,
+            text="Duração:",
+            font=('Segoe UI', 8),
+            fg=self.colors['accent'],
+            bg=self.colors['card_bg'],
+            width=9,
+            anchor='w'
+        ).pack(side=tk.LEFT)
+
+        for label, value in [("Média", "media"), ("Soma", "soma")]:
+            rb = tk.Radiobutton(
+                spectral_dur_frame,
+                text=label,
+                variable=self.spectral_duration_var,
+                value=value,
+                command=self.on_spectral_options_change,
+                font=('Segoe UI', 8),
+                fg=self.colors['fg'],
+                bg=self.colors['card_bg'],
+                selectcolor=self.colors['secondary'],
+                activebackground=self.colors['card_bg'],
+                activeforeground=self.colors['fg'],
+            )
+            rb.pack(side=tk.LEFT, padx=(4, 0))
+
+        # Linha B: Mistura espectral
+        spectral_blend_frame = tk.Frame(self.spectral_row, bg=self.colors['card_bg'])
+        spectral_blend_frame.pack(fill=tk.X, pady=(0, 2))
+
+        tk.Label(
+            spectral_blend_frame,
+            text="Mistura:",
+            font=('Segoe UI', 8),
+            fg=self.colors['accent'],
+            bg=self.colors['card_bg'],
+            width=9,
+            anchor='w'
+        ).pack(side=tk.LEFT)
+
+        for label, value in [("Seleção", "selecao"), ("Amplitude", "amplitude")]:
+            rb = tk.Radiobutton(
+                spectral_blend_frame,
+                text=label,
+                variable=self.spectral_blend_var,
+                value=value,
+                command=self.on_spectral_options_change,
+                font=('Segoe UI', 8),
+                fg=self.colors['fg'],
+                bg=self.colors['card_bg'],
+                selectcolor=self.colors['secondary'],
+                activebackground=self.colors['card_bg'],
+                activeforeground=self.colors['fg'],
+            )
+            rb.pack(side=tk.LEFT, padx=(4, 0))
 
         # ===== LINHA 4: GANHO =====
         interp_row4 = tk.Frame(interp_card, bg=self.colors['card_bg'])
@@ -848,11 +918,34 @@ class AudioInterpolatorApp:
         self.root.after(100, self.monitor_queue)
 
     def update_connection_controls_visibility(self):
-        """Atualiza visibilidade dos controles de conexão baseado no modo selecionado"""
-        if "Conexão" in self.interpolation_mode:
+        """Atualiza visibilidade dos controles baseado no modo selecionado"""
+        mode = self.interpolation_mode
+        is_spectral = "Espectral" in mode
+
+        # Barras de Interpolação e Aleatoriedade — ocultas no modo Espectral
+        if is_spectral:
+            self.interp_row1.pack_forget()
+            self.interp_row2.pack_forget()
+        else:
+            self.interp_row1.pack(fill=tk.X, pady=(0, 3))
+            self.interp_row2.pack(fill=tk.X, pady=(2, 3))
+
+        # Painel de conexão de grãos
+        if "Conexão" in mode:
             self.connection_row.pack(fill=tk.X, pady=(2, 3))
         else:
             self.connection_row.pack_forget()
+
+        # Painel espectral progressivo
+        if is_spectral:
+            self.spectral_row.pack(fill=tk.X, pady=(2, 3))
+        else:
+            self.spectral_row.pack_forget()
+
+    def on_spectral_options_change(self):
+        """Atualiza opções do modo Espectral Progressivo"""
+        self.spectral_duration_mode = self.spectral_duration_var.get()
+        self.spectral_blend_mode    = self.spectral_blend_var.get()
 
     def on_interpolation_mode_change(self, event=None):
         """Atualiza quando modo de interpolação muda"""
@@ -1272,6 +1365,173 @@ class AudioInterpolatorApp:
             print(traceback.format_exc())
             self.audio_queue.put(('error', -1, str(e)))
 
+    def _generate_spectral_progressive_interpolation(self):
+        """
+        Modo Espectral Progressivo
+        ──────────────────────────
+        Cria um áudio interpolado onde cada grão é sintetizado misturando
+        parciais do Áudio 1 e do Áudio 2 de forma progressiva.
+
+        Posição p (0→1) controla simultaneamente:
+          • qual grão de cada áudio é consultado (percurso proporcional)
+          • a proporção de parciais de cada fonte (probabilidade estocástica)
+
+        Modos de mistura (blend):
+          selecao  – cada parcial vem INTEIRO de uma fonte (sorteio por probabilidade)
+          amplitude – cada parcial tem magnitude interpolada entre as duas fontes
+        """
+        try:
+            track1 = self.audio_tracks[0]
+            track2 = self.audio_tracks[1]
+
+            if not track1.grain_frequencies or not track2.grain_frequencies:
+                raise ValueError("Processe ambos os áudios primeiro!")
+
+            sr = track1.sample_rate
+            grain_samples = int(self.grain_duration * sr / 1000)
+            hop_size      = int(grain_samples * (1 - self.overlap))
+            envelope      = self.grain_processor.create_tukey_envelope(grain_samples, alpha=0.4)
+
+            num_grains1 = len(track1.grain_frequencies)
+            num_grains2 = len(track2.grain_frequencies)
+
+            # ── 1. Duração do áudio interpolado ───────────────────────────
+            dur1_samples = len(track1.original)
+            dur2_samples = len(track2.original)
+
+            if self.spectral_duration_mode == "soma":
+                total_samples = dur1_samples + dur2_samples
+            else:  # "media"
+                total_samples = (dur1_samples + dur2_samples) // 2
+
+            # Número de grãos necessários para cobrir total_samples
+            N = max(2, (total_samples - grain_samples) // hop_size + 1)
+
+            # Ajusta total_samples para ser exatamente o que N grãos produzem
+            total_samples = (N - 1) * hop_size + grain_samples
+
+            interpolated = np.zeros(total_samples)
+
+            # Ganhos individuais dos tracks
+            gain1 = track1.gain
+            gain2 = track2.gain
+
+            # ── 2. Loop grão a grão ────────────────────────────────────────
+            for i in range(N):
+                p = i / (N - 1)   # posição 0.0 → 1.0
+
+                # Índices dos grãos fonte (percurso proporcional independente)
+                idx1 = int(round(p * (num_grains1 - 1)))
+                idx2 = int(round(p * (num_grains2 - 1)))
+                idx1 = min(idx1, num_grains1 - 1)
+                idx2 = min(idx2, num_grains2 - 1)
+
+                freq1  = track1.grain_frequencies[idx1]
+                mag1   = track1.grain_magnitudes[idx1] * gain1
+                phase1 = track1.grain_phases[idx1]
+
+                freq2  = track2.grain_frequencies[idx2]
+                mag2   = track2.grain_magnitudes[idx2] * gain2
+                phase2 = track2.grain_phases[idx2]
+
+                # ── 3. Síntese do grão interpolado ─────────────────────────
+                n_total  = self.num_partials
+                t = np.linspace(0, self.grain_duration / 1000, grain_samples, endpoint=False)
+                grain_out = np.zeros(grain_samples)
+
+                if self.spectral_blend_mode == "selecao":
+                    # ── Modo Seleção: cada slot é sorteado para uma fonte ──
+                    # Normaliza magnitudes para usar como peso dentro de cada fonte
+                    w1 = mag1 / (np.max(mag1) + 1e-9)
+                    w2 = mag2 / (np.max(mag2) + 1e-9)
+
+                    for slot in range(n_total):
+                        # Sorteio: prob (1-p) → Áudio 1, prob p → Áudio 2
+                        use_src2 = (random.random() < p)
+
+                        if use_src2:
+                            if slot < len(freq2) and freq2[slot] > 20 and freq2[slot] < sr / 2:
+                                grain_out += w2[slot] * np.sin(
+                                    2 * np.pi * freq2[slot] * t + phase2[slot])
+                        else:
+                            if slot < len(freq1) and freq1[slot] > 20 and freq1[slot] < sr / 2:
+                                grain_out += w1[slot] * np.sin(
+                                    2 * np.pi * freq1[slot] * t + phase1[slot])
+
+                else:
+                    # ── Modo Amplitude: lerp das magnitudes, freq da fonte majoritária ──
+                    # Garante vetores de mesmo tamanho para interpolação
+                    n_common = min(len(freq1), len(freq2), n_total)
+
+                    # Normaliza magnitudes antes de interpolar
+                    m1_norm = mag1[:n_common] / (np.max(mag1[:n_common]) + 1e-9)
+                    m2_norm = mag2[:n_common] / (np.max(mag2[:n_common]) + 1e-9)
+                    mag_interp = (1 - p) * m1_norm + p * m2_norm
+
+                    for slot in range(n_common):
+                        # Frequência: sorteio ponderado pela prob p
+                        use_src2 = (random.random() < p)
+                        freq_use  = freq2[slot] if use_src2 else freq1[slot]
+                        phase_use = phase2[slot] if use_src2 else phase1[slot]
+
+                        if freq_use > 20 and freq_use < sr / 2:
+                            grain_out += mag_interp[slot] * np.sin(
+                                2 * np.pi * freq_use * t + phase_use)
+
+                # ── 4. Escala RMS e aplica envelope ────────────────────────
+                rms = np.sqrt(np.mean(grain_out ** 2))
+                if rms > NOISE_FLOOR:
+                    grain_out = grain_out / rms * 0.5   # nível alvo fixo
+                grain_out *= envelope
+
+                # ── 5. Overlap-add ─────────────────────────────────────────
+                start = i * hop_size
+                end   = start + grain_samples
+                if start >= total_samples:
+                    break
+                if end > total_samples:
+                    end = total_samples
+                    grain_out = grain_out[:end - start]
+                interpolated[start:end] += grain_out
+
+                # Progresso
+                if N > 0 and i % max(1, N // 20) == 0:
+                    self.audio_queue.put(('interpolation_progress', (i + 1) / N * 100))
+
+            # ── 6. Pós-processamento ───────────────────────────────────────
+            # Normalização
+            max_val = np.max(np.abs(interpolated))
+            if self.normalize_var.get() and max_val > 0:
+                interpolated = interpolated / max_val * 0.9
+            elif max_val > 1.0:
+                interpolated = interpolated / max_val * 0.95
+
+            # Dinâmica
+            if self.dynamic_var.get():
+                interpolated = self._apply_dynamics_to_interpolation(
+                    interpolated, track1, track2, self.interpolation_factor)
+
+            # Ganho da interpolação
+            interpolated = interpolated * self.interpolation_gain_linear
+
+            # Fade-out final (evita click)
+            interpolated = self._apply_fadeout(interpolated, sr, fadeout_ms=80)
+
+            # Limiter
+            max_amp = np.max(np.abs(interpolated))
+            if max_amp > 1.0:
+                interpolated = np.tanh(interpolated * 0.8) * 1.2
+
+            self.interpolated_audio     = interpolated
+            self.interpolated_audio_raw = interpolated.copy()
+            self.audio_queue.put(('interpolation_done', interpolated))
+
+        except Exception as e:
+            import traceback
+            print(f"Erro na interpolação espectral progressiva: {str(e)}")
+            print(traceback.format_exc())
+            self.audio_queue.put(('error', -1, str(e)))
+
     def _generate_interpolation_thread(self):
         """Thread para geração da interpolação - agora com suporte a conexão"""
         try:
@@ -1299,6 +1559,9 @@ class AudioInterpolatorApp:
             if "Conexão" in self.interpolation_mode:
                 # Modo com Conexão de Grãos
                 self._generate_interpolation_with_connection()
+            elif "Espectral" in self.interpolation_mode:
+                # Modo Espectral Progressivo
+                self._generate_spectral_progressive_interpolation()
             else:
                 # Modo Granular Simples (original)
                 self._generate_simple_granular_interpolation()
@@ -2875,6 +3138,12 @@ class AudioInterpolatorApp:
         # Se modo conexão, adiciona duração do grão de conexão
         if "Conexão" in self.interpolation_mode:
             title_parts.append(f"{self.connection_grain_duration}")
+
+        # Se modo espectral progressivo, adiciona sufixo das opções
+        if "Espectral" in self.interpolation_mode:
+            dur_tag   = "S" if self.spectral_duration_mode == "soma" else "M"
+            blend_tag = "A" if self.spectral_blend_mode == "amplitude" else "Sel"
+            title_parts.append(f"EP-{dur_tag}{blend_tag}")
 
         # Adiciona quantidade de parciais
         title_parts.append(f"{self.num_partials}")
