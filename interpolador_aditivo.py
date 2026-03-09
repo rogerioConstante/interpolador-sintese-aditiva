@@ -907,12 +907,17 @@ class AudioInterpolatorApp:
             total_grains = grains_from_1 + grains_from_2
 
             # Seleciona grãos distribuídos uniformemente
+            # O ganho de cada track é aplicado aqui, sobre os grãos selecionados
+            gain1 = track1.gain  # gain linear do Áudio 1
+            gain2 = track2.gain  # gain linear do Áudio 2
+
             if grains_from_1 > 0:
                 step1 = max(1, num_grains1 // grains_from_1)
                 indices1 = list(range(0, num_grains1, step1))[:grains_from_1]
-                selected_grains1 = [grains1[i] for i in indices1]
+                selected_grains1 = [grains1[i] * gain1 for i in indices1]
                 selected_freqs1 = [track1.grain_frequencies[i] for i in indices1]
-                selected_mags1 = [track1.grain_magnitudes[i] for i in indices1]
+                # Magnitudes também escaladas pelo ganho para que os grãos de conexão respeitem o ganho
+                selected_mags1 = [track1.grain_magnitudes[i] * gain1 for i in indices1]
                 selected_phases1 = [track1.grain_phases[i] for i in indices1]
                 selected_indices1 = indices1
             else:
@@ -925,9 +930,9 @@ class AudioInterpolatorApp:
             if grains_from_2 > 0:
                 step2 = max(1, num_grains2 // grains_from_2)
                 indices2 = list(range(0, num_grains2, step2))[:grains_from_2]
-                selected_grains2 = [grains2[i] for i in indices2]
+                selected_grains2 = [grains2[i] * gain2 for i in indices2]
                 selected_freqs2 = [track2.grain_frequencies[i] for i in indices2]
-                selected_mags2 = [track2.grain_magnitudes[i] for i in indices2]
+                selected_mags2 = [track2.grain_magnitudes[i] * gain2 for i in indices2]
                 selected_phases2 = [track2.grain_phases[i] for i in indices2]
                 selected_indices2 = indices2
             else:
@@ -1247,6 +1252,9 @@ class AudioInterpolatorApp:
             # Aplica ganho da interpolação
             interpolated = interpolated * self.interpolation_gain_linear
 
+            # Aplica fade-out de 80ms no final para evitar click
+            interpolated = self._apply_fadeout(interpolated, track1.sample_rate, fadeout_ms=80)
+
             # Limiter final
             max_amp = np.max(np.abs(interpolated))
             if max_amp > 1.0:
@@ -1335,17 +1343,21 @@ class AudioInterpolatorApp:
             total_grains = grains_from_1 + grains_from_2
 
             # Seleciona grãos distribuídos uniformemente
+            # O ganho de cada track é aplicado aqui, sobre os grãos selecionados
+            gain1 = track1.gain  # gain linear do Áudio 1
+            gain2 = track2.gain  # gain linear do Áudio 2
+
             if grains_from_1 > 0:
                 step1 = max(1, num_grains1 // grains_from_1)
                 indices1 = list(range(0, num_grains1, step1))[:grains_from_1]
-                selected_grains1 = [grains1[i] for i in indices1]
+                selected_grains1 = [grains1[i] * gain1 for i in indices1]
             else:
                 selected_grains1 = []
 
             if grains_from_2 > 0:
                 step2 = max(1, num_grains2 // grains_from_2)
                 indices2 = list(range(0, num_grains2, step2))[:grains_from_2]
-                selected_grains2 = [grains2[i] for i in indices2]
+                selected_grains2 = [grains2[i] * gain2 for i in indices2]
             else:
                 selected_grains2 = []
 
@@ -1497,6 +1509,9 @@ class AudioInterpolatorApp:
 
             # Aplica ganho da interpolação
             interpolated = interpolated * self.interpolation_gain_linear
+
+            # Aplica fade-out de 80ms no final para evitar click
+            interpolated = self._apply_fadeout(interpolated, track1.sample_rate, fadeout_ms=80)
 
             # Limiter final
             max_amp = np.max(np.abs(interpolated))
@@ -2482,6 +2497,20 @@ class AudioInterpolatorApp:
         resampled = np.interp(source_indices, np.arange(len(audio)), audio)
 
         return resampled
+
+    def _apply_fadeout(self, audio, sample_rate, fadeout_ms=80):
+        """Aplica fade-out cossenoidal no final do áudio para evitar click"""
+        if audio is None or len(audio) == 0:
+            return audio
+        fadeout_samples = int(fadeout_ms * sample_rate / 1000)
+        fadeout_samples = min(fadeout_samples, len(audio))
+        if fadeout_samples <= 0:
+            return audio
+        # Envelope cossenoidal suave (0 -> pi/2 mapeado para 1 -> 0)
+        fade = 0.5 * (1 + np.cos(np.pi * np.arange(fadeout_samples) / fadeout_samples))
+        result = audio.copy()
+        result[-fadeout_samples:] *= fade
+        return result
 
     def _process_then_interpolate(self):
         """Processa os áudios e depois gera a interpolação"""
