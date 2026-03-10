@@ -755,7 +755,7 @@ class AudioInterpolatorApp:
             )
             rb.pack(side=tk.LEFT, padx=(4, 0))
 
-        # Linha C: Slider duplo — janela de interpolação
+        # Linha C: Slider duplo — régua com três zonas
         spectral_range_label = tk.Label(
             self.spectral_row,
             text="Janela:",
@@ -766,57 +766,32 @@ class AudioInterpolatorApp:
         )
         spectral_range_label.pack(fill=tk.X, pady=(4, 0))
 
-        # Frame para o canvas + labels de valor
-        range_widget_frame = tk.Frame(self.spectral_row, bg=self.colors['card_bg'])
-        range_widget_frame.pack(fill=tk.X, pady=(2, 4))
-
-        # Labels de percentual (esquerda = start, direita = end)
-        self.range_start_label = tk.Label(
-            range_widget_frame,
-            text="0%",
-            font=('Segoe UI', 7),
-            fg=self.colors['primary'],
-            bg=self.colors['card_bg'],
-            width=4,
-            anchor='w'
-        )
-        self.range_start_label.pack(side=tk.LEFT)
-
-        # Canvas do slider duplo
-        _SLIDER_H   = 22   # altura do canvas
-        _HANDLE_R   = 7    # raio dos handles
-        _TRACK_Y    = 11   # centro vertical da trilha
+        # Canvas único: trilha + handles + legendas das três zonas
+        _SLIDER_H   = 38   # altura suficiente para trilha + texto das zonas
+        _HANDLE_R   = 7
+        _TRACK_Y    = 12   # centro vertical da trilha
         self._rs_H  = _HANDLE_R
         self._rs_TY = _TRACK_Y
 
         self.range_canvas = tk.Canvas(
-            range_widget_frame,
+            self.spectral_row,
             height=_SLIDER_H,
             bg=self.colors['card_bg'],
             highlightthickness=0,
             cursor="hand2"
         )
-        self.range_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 4))
+        self.range_canvas.pack(fill=tk.X, pady=(2, 4))
 
-        self.range_end_label = tk.Label(
-            range_widget_frame,
-            text="100%",
-            font=('Segoe UI', 7),
-            fg=self.colors['primary'],
-            bg=self.colors['card_bg'],
-            width=5,
-            anchor='e'
-        )
-        self.range_end_label.pack(side=tk.LEFT)
-
-        # Desenha o slider depois que o canvas tiver tamanho real
-        self.range_canvas.bind("<Configure>", self._on_range_canvas_configure)
+        # Bindings
+        self.range_canvas.bind("<Configure>",       self._on_range_canvas_configure)
         self.range_canvas.bind("<ButtonPress-1>",   self._on_range_press)
         self.range_canvas.bind("<B1-Motion>",       self._on_range_drag)
         self.range_canvas.bind("<ButtonRelease-1>", self._on_range_release)
 
         # Estado interno do slider duplo
-        self._range_drag_target = None   # 'start' | 'end' | None
+        self._range_drag_target  = None   # 'start' | 'end' | None
+        self._range_max_start    = 1.0    # atualizado quando áudios carregam
+        self._range_min_end      = 0.0    # atualizado quando áudios carregam
 
         # ===== LINHA 4: GANHO =====
         interp_row4 = tk.Frame(interp_card, bg=self.colors['card_bg'])
@@ -1010,64 +985,134 @@ class AudioInterpolatorApp:
     # ── Slider duplo (janela de interpolação espectral) ───────────────────
 
     def _range_canvas_width(self):
-        """Largura útil do canvas (atualizada após Configure)"""
         w = self.range_canvas.winfo_width()
         return max(w, 100)
 
     def _val_to_x(self, val):
-        """Converte 0.0–1.0 → coordenada x no canvas"""
         r = self._rs_H
         w = self._range_canvas_width()
         return r + val * (w - 2 * r)
 
     def _x_to_val(self, x):
-        """Converte coordenada x → 0.0–1.0 (clampado)"""
         r = self._rs_H
         w = self._range_canvas_width()
         return max(0.0, min(1.0, (x - r) / (w - 2 * r)))
 
     def _draw_range_slider(self):
-        """Redesenha trilha + faixa colorida + dois handles"""
+        """Redesenha régua: trilha, faixas de zona, handles e legendas."""
         c  = self.range_canvas
         c.delete("all")
         w  = self._range_canvas_width()
-        ty = self._rs_TY
-        r  = self._rs_H
+        ty = self._rs_TY   # centro vertical da trilha (12)
+        r  = self._rs_H    # raio dos handles (7)
+        lh = 26            # y-base das legendas das zonas
 
         xs = self._val_to_x(self.spectral_interp_start)
         xe = self._val_to_x(self.spectral_interp_end)
 
-        # Trilha de fundo
-        c.create_line(r, ty, w - r, ty,
-                      fill=self.colors['secondary'], width=4,
-                      capstyle=tk.ROUND, tags="track_bg")
+        # ── Faixas coloridas das zonas (espessura 4, abaixo da trilha) ──
+        TH = 4   # espessura da trilha
+        # Zona A — Áudio 1 (azul primário, esquerda até xs)
+        if xs > r:
+            c.create_line(r, ty, xs, ty,
+                          fill=self.colors['primary'], width=TH,
+                          capstyle=tk.ROUND)
+        # Zona B — Interpolação (verde, xs até xe)
+        if xe > xs:
+            c.create_line(xs, ty, xe, ty,
+                          fill=self.colors['interpolation'], width=TH,
+                          capstyle=tk.BUTT)
+        # Zona C — Áudio 2 (rosa accent, xe até fim)
+        if w - r > xe:
+            c.create_line(xe, ty, w - r, ty,
+                          fill=self.colors['accent'], width=TH,
+                          capstyle=tk.ROUND)
 
-        # Faixa ativa (entre os handles)
-        c.create_line(xs, ty, xe, ty,
-                      fill=self.colors['interpolation'], width=4,
-                      capstyle=tk.ROUND, tags="track_active")
-
-        # Handle START
+        # ── Handles ──
+        # Handle START (azul)
         c.create_oval(xs - r, ty - r, xs + r, ty + r,
                       fill=self.colors['primary'],
                       outline=self.colors['bg'], width=2,
                       tags="handle_start")
-
-        # Handle END
+        # Handle END (rosa)
         c.create_oval(xe - r, ty - r, xe + r, ty + r,
                       fill=self.colors['accent'],
                       outline=self.colors['bg'], width=2,
                       tags="handle_end")
 
+        # ── Legendas das três zonas ──
+        s  = self.spectral_interp_start
+        e  = self.spectral_interp_end
+        fs = ('Segoe UI', 7)
+
+        # Zona A: "Áudio 1  0%→{s%}"
+        cx_a = (r + xs) / 2
+        c.create_text(cx_a, lh,
+                      text=f"Áudio 1\n0%→{s*100:.0f}%",
+                      fill=self.colors['primary'],
+                      font=fs, anchor='n', justify='center')
+
+        # Zona B: "Interp  {s%}→{e%}"
+        cx_b = (xs + xe) / 2
+        c.create_text(cx_b, lh,
+                      text=f"Interp\n{s*100:.0f}%→{e*100:.0f}%",
+                      fill=self.colors['interpolation'],
+                      font=fs, anchor='n', justify='center')
+
+        # Zona C: "Áudio 2  {e%}→100%"
+        cx_c = (xe + w - r) / 2
+        c.create_text(cx_c, lh,
+                      text=f"Áudio 2\n{e*100:.0f}%→100%",
+                      fill=self.colors['accent'],
+                      font=fs, anchor='n', justify='center')
+
+    def _compute_range_limits(self):
+        """
+        Calcula max_start e min_end em função das durações reais dos áudios
+        e do modo de duração (soma / média).
+        Deve ser chamado sempre que um áudio é carregado ou o modo muda.
+        """
+        t1 = self.audio_tracks[0]
+        t2 = self.audio_tracks[1]
+
+        if t1.original is None or t2.original is None:
+            # Sem áudios carregados: limites totais
+            self._range_max_start = 0.99
+            self._range_min_end   = 0.01
+            return
+
+        dur1 = len(t1.original) / t1.sample_rate
+        dur2 = len(t2.original) / t2.sample_rate
+
+        if self.spectral_duration_mode == "soma":
+            dur_total = dur1 + dur2
+        else:
+            dur_total = (dur1 + dur2) / 2.0
+
+        # marker_start não pode ultrapassar 99% da duração do Áudio 1
+        self._range_max_start = min(0.99, (dur1 * 0.99) / dur_total)
+        # marker_end não pode começar antes de 1% da duração do Áudio 2
+        self._range_min_end   = max(0.01, (dur_total - dur2 * 0.99) / dur_total)
+
+        # Garante que os valores atuais respeitam os novos limites
+        MIN_GAP = 0.02
+        self.spectral_interp_start = min(self.spectral_interp_start,
+                                         self._range_max_start)
+        self.spectral_interp_end   = max(self.spectral_interp_end,
+                                         self._range_min_end)
+        # Mantém gap mínimo
+        if self.spectral_interp_end - self.spectral_interp_start < MIN_GAP:
+            mid = (self.spectral_interp_start + self.spectral_interp_end) / 2
+            self.spectral_interp_start = max(0.0, mid - MIN_GAP / 2)
+            self.spectral_interp_end   = min(1.0, mid + MIN_GAP / 2)
+
     def _on_range_canvas_configure(self, event):
-        """Redesenha quando o canvas muda de tamanho"""
         self._draw_range_slider()
 
     def _on_range_press(self, event):
-        """Determina qual handle está sendo arrastado"""
         xs = self._val_to_x(self.spectral_interp_start)
         xe = self._val_to_x(self.spectral_interp_end)
-        r  = self._rs_H + 3   # margem de clique ligeiramente maior que o raio
+        r  = self._rs_H + 4
 
         dist_s = abs(event.x - xs)
         dist_e = abs(event.x - xe)
@@ -1080,36 +1125,32 @@ class AudioInterpolatorApp:
             self._range_drag_target = None
 
     def _on_range_drag(self, event):
-        """Atualiza o handle arrastado, respeitando a ordem start ≤ end"""
         if self._range_drag_target is None:
             return
-        val = self._x_to_val(event.x)
-        MIN_GAP = 0.02   # handles não podem se sobrepor
+        val     = self._x_to_val(event.x)
+        MIN_GAP = 0.02
 
         if self._range_drag_target == 'start':
-            self.spectral_interp_start = min(val, self.spectral_interp_end - MIN_GAP)
-            self.spectral_interp_start = max(0.0, self.spectral_interp_start)
+            val = max(0.0, min(val, self._range_max_start))
+            val = min(val, self.spectral_interp_end - MIN_GAP)
+            self.spectral_interp_start = val
         else:
-            self.spectral_interp_end = max(val, self.spectral_interp_start + MIN_GAP)
-            self.spectral_interp_end = min(1.0, self.spectral_interp_end)
+            val = min(1.0, max(val, self._range_min_end))
+            val = max(val, self.spectral_interp_start + MIN_GAP)
+            self.spectral_interp_end = val
 
         self._draw_range_slider()
-        self._update_range_labels()
 
     def _on_range_release(self, event):
         self._range_drag_target = None
-
-    def _update_range_labels(self):
-        """Atualiza os labels de percentual"""
-        self.range_start_label.config(
-            text=f"{self.spectral_interp_start * 100:.0f}%")
-        self.range_end_label.config(
-            text=f"{self.spectral_interp_end * 100:.0f}%")
 
     def on_spectral_options_change(self):
         """Atualiza opções do modo Espectral Progressivo"""
         self.spectral_duration_mode = self.spectral_duration_var.get()
         self.spectral_blend_mode    = self.spectral_blend_var.get()
+        # Recalcula limites dos handles pois a duração total pode ter mudado
+        self._compute_range_limits()
+        self._draw_range_slider()
 
     def on_interpolation_mode_change(self, event=None):
         """Atualiza quando modo de interpolação muda"""
@@ -1590,20 +1631,39 @@ class AudioInterpolatorApp:
             for i in range(N):
                 pos = i / (N - 1)   # posição do grão no áudio total (0.0→1.0)
 
-                # Calcula p conforme a fase
+                # ── Calcula p (mistura espectral) e índices de grão ────────
                 if pos <= marker_start:
-                    p = 0.0          # Fase A: 100% Áudio 1
-                elif pos >= marker_end:
-                    p = 1.0          # Fase C: 100% Áudio 2
-                else:
-                    # Fase B: normaliza dentro da janela de interpolação
-                    p = (pos - marker_start) / (marker_end - marker_start)
+                    # Fase A: só Áudio 1, percorre seus grãos de 0 → marker_start
+                    p = 0.0
+                    frac_a = (pos / marker_start) if marker_start > 0 else 0.0
+                    idx1 = int(round(frac_a * (num_grains1 - 1) * marker_start))
+                    idx1 = min(idx1, num_grains1 - 1)
+                    idx2 = 0   # não usado em p=0, mas define um valor seguro
 
-                # Índices dos grãos fonte (percurso proporcional independente)
-                idx1 = int(round(p * (num_grains1 - 1)))
-                idx2 = int(round(p * (num_grains2 - 1)))
-                idx1 = min(idx1, num_grains1 - 1)
-                idx2 = min(idx2, num_grains2 - 1)
+                elif pos >= marker_end:
+                    # Fase C: só Áudio 2, percorre seus grãos de marker_end → 1.0
+                    p = 1.0
+                    span_c = 1.0 - marker_end
+                    frac_c = ((pos - marker_end) / span_c) if span_c > 0 else 1.0
+                    # idx2 começa de onde a Fase B parou (marker_end * num_grains2)
+                    # e vai até o último grão
+                    idx2_start = int(round(marker_end * (num_grains2 - 1)))
+                    idx2 = idx2_start + int(round(frac_c * (num_grains2 - 1 - idx2_start)))
+                    idx2 = min(idx2, num_grains2 - 1)
+                    idx1 = num_grains1 - 1   # não usado em p=1
+
+                else:
+                    # Fase B: interpolação progressiva
+                    # p vai 0→1 dentro da janela
+                    p = (pos - marker_start) / (marker_end - marker_start)
+                    # Áudio 1: continua de marker_start até o fim (grão final)
+                    idx1_start = int(round(marker_start * (num_grains1 - 1)))
+                    idx1 = idx1_start + int(round(p * (num_grains1 - 1 - idx1_start)))
+                    idx1 = min(idx1, num_grains1 - 1)
+                    # Áudio 2: começa do início e vai até marker_end
+                    idx2_end = int(round(marker_end * (num_grains2 - 1)))
+                    idx2 = int(round(p * idx2_end))
+                    idx2 = min(idx2, num_grains2 - 1)
 
                 freq1  = track1.grain_frequencies[idx1]
                 mag1   = track1.grain_magnitudes[idx1] * gain1
@@ -2666,6 +2726,9 @@ class AudioInterpolatorApp:
             if audio1_loaded and audio2_loaded:
                 # Ambos áudios carregados, habilita botão Gerar
                 self.generate_btn.config(state='normal')
+                # Recalcula limites do slider duplo com as durações reais
+                self._compute_range_limits()
+                self._draw_range_slider()
 
             # Atualiza status
             self.status_var.set(f"{track.name} carregado: {filename}")
