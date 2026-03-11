@@ -896,6 +896,16 @@ class AudioInterpolatorApp:
         )
         self.save_interp_btn.pack(side=tk.RIGHT)
 
+        self.repair_btn = ttk.Button(
+            action_frame,
+            text="🔧 Reparar",
+            command=self.repair_interpolation,
+            style='Secondary.TButton',
+            width=10,
+            state='disabled'
+        )
+        self.repair_btn.pack(side=tk.RIGHT, padx=(0, 4))
+
         self.play_interp_btn = ttk.Button(
             action_frame,
             text="▶",
@@ -3521,6 +3531,104 @@ class AudioInterpolatorApp:
         except Exception as e:
             self.status_var.set(f"Erro na reprodução: {str(e)}")
 
+    def _repair_audio(self, audio, sample_rate, grain_duration_ms, n_passes=2):
+        """
+        Detecta e suaviza descontinuidades locais (clicks) na forma de onda.
+
+        Parâmetros adaptativos calculados a partir do sample_rate e do grain_duration_ms:
+          - window_samples : janela de suavização = 5 % do grão (mín. 8 amostras)
+          - sigma          : largura da gaussiana  = 0.1 ms em amostras (mín. 2)
+          - threshold_k    : sensibilidade de detecção = 4 × desvio-padrão da 2ª derivada
+
+        Retorna (audio_reparado, n_clicks_tratados).
+        """
+        from scipy.ndimage import gaussian_filter1d
+
+        audio = audio.copy().astype(np.float64)
+
+        # Parâmetros adaptativos
+        grain_samples  = int(grain_duration_ms * sample_rate / 1000)
+        window_samples = max(8, int(grain_samples * 0.05))   # 5 % do grão
+        sigma          = max(2, int(sample_rate * 0.0001))   # ~0.1 ms
+        threshold_k    = 4.0
+
+        total_clicks = 0
+
+        for _ in range(n_passes):
+            # 2ª derivada discreta — detecta "saltos" na curvatura da onda
+            d2 = np.abs(np.diff(audio, n=2))
+
+            mu    = np.mean(d2)
+            sigma_d2 = np.std(d2)
+            threshold = mu + threshold_k * sigma_d2
+
+            click_pos = np.where(d2 > threshold)[0] + 1   # +1: offset da diff n=2
+
+            # Agrupa posições próximas (dentro de window_samples) em um único click
+            if len(click_pos) == 0:
+                break
+
+            clusters = []
+            cluster  = [click_pos[0]]
+            for pos in click_pos[1:]:
+                if pos - cluster[-1] <= window_samples:
+                    cluster.append(pos)
+                else:
+                    clusters.append(cluster)
+                    cluster = [pos]
+            clusters.append(cluster)
+
+            # Para cada cluster, suaviza a janela centrada no pico máximo
+            for cluster in clusters:
+                # Centro = posição de máxima 2ª derivada no cluster
+                center = cluster[np.argmax(d2[np.array(cluster) - 1])]
+
+                lo = max(0, center - window_samples)
+                hi = min(len(audio), center + window_samples)
+
+                if hi - lo < 4:
+                    continue
+
+                # Suavização gaussiana local — só altera a janela, não o resto
+                audio[lo:hi] = gaussian_filter1d(audio[lo:hi], sigma=sigma)
+
+            total_clicks += len(clusters)
+
+        return audio.astype(np.float32), total_clicks
+
+    def repair_interpolation(self):
+        """Aplica reparo de clicks no áudio interpolado atual."""
+        if self.interpolated_audio is None:
+            return
+
+        self.repair_btn.config(state='disabled')
+        self.status_var.set("Reparando áudio…")
+        self.root.update_idletasks()
+
+        try:
+            sr      = self.audio_tracks[0].sample_rate
+            g_ms    = self.grain_duration
+
+            repaired, n_clicks = self._repair_audio(
+                self.interpolated_audio, sr, g_ms, n_passes=2
+            )
+
+            self.interpolated_audio     = repaired
+            self.interpolated_audio_raw = repaired.copy()
+
+            self.plot_interpolated_waveform(repaired)
+            self.status_var.set(
+                f"Reparo concluído — {n_clicks} região(ões) suavizada(s)."
+            )
+
+        except Exception as e:
+            import traceback
+            print(traceback.format_exc())
+            self.status_var.set(f"Erro no reparo: {e}")
+
+        finally:
+            self.repair_btn.config(state='normal')
+
     def save_interpolation(self):
         """Salva áudio interpolado"""
         if self.interpolated_audio is None:
@@ -3679,6 +3787,7 @@ class AudioInterpolatorApp:
 
                     self.save_interp_btn.config(state='normal')
                     self.play_interp_btn.config(state='normal')
+                    self.repair_btn.config(state='normal')
 
                     duration = len(audio) / self.audio_tracks[0].sample_rate
                     self.status_var.set(f"Interpolação gerada! Duração: {duration:.2f}s")
