@@ -385,10 +385,11 @@ class AudioInterpolatorApp:
         self.interpolation_gain_linear = 1.0
 
         # Configurações do modo Espectral Progressivo
-        self.spectral_duration_mode  = "media"   # "soma" ou "media"
-        self.spectral_blend_mode     = "selecao" # "selecao" ou "amplitude"
-        self.spectral_interp_start   = 0.0       # 0.0–1.0 — início da interpolação
-        self.spectral_interp_end     = 1.0       # 0.0–1.0 — fim   da interpolação
+        self.spectral_duration_mode  = "media"        # "soma" ou "media"
+        self.spectral_blend_mode     = "selecao"      # "selecao" ou "amplitude"
+        self.spectral_phase_mode     = "natural"      # "natural" ou "proporcional"
+        self.spectral_interp_start   = 0.0            # 0.0–1.0 — início da interpolação
+        self.spectral_interp_end     = 1.0            # 0.0–1.0 — fim   da interpolação
 
         # Criar variáveis de controle
         self.grain_var = tk.IntVar(value=self.grain_duration)
@@ -401,6 +402,7 @@ class AudioInterpolatorApp:
         self.mode_var = tk.StringVar(value=self.interpolation_modes[0])
         self.spectral_duration_var = tk.StringVar(value="media")
         self.spectral_blend_var    = tk.StringVar(value="selecao")
+        self.spectral_phase_var    = tk.StringVar(value="natural")
         self.dynamic_var = tk.BooleanVar(value=self.dynamic_preservation)
         self.normalize_var = tk.BooleanVar(value=self.normalize_audio)
         
@@ -744,6 +746,36 @@ class AudioInterpolatorApp:
                 spectral_blend_frame,
                 text=label,
                 variable=self.spectral_blend_var,
+                value=value,
+                command=self.on_spectral_options_change,
+                font=('Segoe UI', 8),
+                fg=self.colors['fg'],
+                bg=self.colors['card_bg'],
+                selectcolor=self.colors['secondary'],
+                activebackground=self.colors['card_bg'],
+                activeforeground=self.colors['fg'],
+            )
+            rb.pack(side=tk.LEFT, padx=(4, 0))
+
+        # Linha B2: Modo das fases A e C
+        spectral_phase_frame = tk.Frame(self.spectral_row, bg=self.colors['card_bg'])
+        spectral_phase_frame.pack(fill=tk.X, pady=(0, 2))
+
+        tk.Label(
+            spectral_phase_frame,
+            text="Fases A/C:",
+            font=('Segoe UI', 8),
+            fg=self.colors['accent'],
+            bg=self.colors['card_bg'],
+            width=9,
+            anchor='w'
+        ).pack(side=tk.LEFT)
+
+        for label, value in [("Natural", "natural"), ("Proporcional", "proporcional")]:
+            rb = tk.Radiobutton(
+                spectral_phase_frame,
+                text=label,
+                variable=self.spectral_phase_var,
                 value=value,
                 command=self.on_spectral_options_change,
                 font=('Segoe UI', 8),
@@ -1148,6 +1180,7 @@ class AudioInterpolatorApp:
         """Atualiza opções do modo Espectral Progressivo"""
         self.spectral_duration_mode = self.spectral_duration_var.get()
         self.spectral_blend_mode    = self.spectral_blend_var.get()
+        self.spectral_phase_mode    = self.spectral_phase_var.get()
         # Recalcula limites dos handles pois a duração total pode ter mudado
         self._compute_range_limits()
         self._draw_range_slider()
@@ -1624,43 +1657,63 @@ class AudioInterpolatorApp:
             # ── 2. Loop grão a grão ────────────────────────────────────────
             marker_start = self.spectral_interp_start   # 0.0–1.0
             marker_end   = self.spectral_interp_end     # 0.0–1.0
-            # Garante ordem válida mesmo que UI esteja em estado inconsistente
             if marker_end <= marker_start:
                 marker_end = min(marker_start + 0.02, 1.0)
 
-            for i in range(N):
-                pos = i / (N - 1)   # posição do grão no áudio total (0.0→1.0)
+            # Número de slots em cada fase
+            N_a = int(round(marker_start * (N - 1)))   # slots da Fase A
+            N_c = N - 1 - int(round(marker_end * (N - 1)))  # slots da Fase C
+            N_b = N - N_a - N_c                         # slots da Fase B
+            N_b = max(N_b, 1)
 
-                # ── Calcula p (mistura espectral) e índices de grão ────────
+            # Pré-computa o vetor t (igual para todos os grãos)
+            t = np.linspace(0, self.grain_duration / 1000, grain_samples, endpoint=False)
+
+            use_natural = (self.spectral_phase_mode == "natural")
+
+            for i in range(N):
+                pos = i / (N - 1)   # posição 0.0→1.0 no áudio total
+
+                # ── Calcula idx1, idx2 e p conforme a fase ─────────────────
                 if pos <= marker_start:
-                    # Fase A: só Áudio 1, percorre seus grãos de 0 → marker_start
+                    # ── FASE A: só Áudio 1 ──────────────────────────────────
                     p = 0.0
-                    frac_a = (pos / marker_start) if marker_start > 0 else 0.0
-                    idx1 = int(round(frac_a * (num_grains1 - 1) * marker_start))
-                    idx1 = min(idx1, num_grains1 - 1)
-                    idx2 = 0   # não usado em p=0, mas define um valor seguro
+                    if use_natural:
+                        # Reprodução 1-para-1: grão i → grão i do Áudio 1
+                        idx1 = min(i, num_grains1 - 1)
+                    else:
+                        # Proporcional: escala os N_a slots sobre num_grains1
+                        frac_a = (i / N_a) if N_a > 0 else 0.0
+                        idx1 = int(round(frac_a * (num_grains1 - 1)))
+                        idx1 = min(idx1, num_grains1 - 1)
+                    idx2 = 0   # não usado com p=0
 
                 elif pos >= marker_end:
-                    # Fase C: só Áudio 2, percorre seus grãos de marker_end → 1.0
+                    # ── FASE C: só Áudio 2 ──────────────────────────────────
                     p = 1.0
-                    span_c = 1.0 - marker_end
-                    frac_c = ((pos - marker_end) / span_c) if span_c > 0 else 1.0
-                    # idx2 começa de onde a Fase B parou (marker_end * num_grains2)
-                    # e vai até o último grão
-                    idx2_start = int(round(marker_end * (num_grains2 - 1)))
-                    idx2 = idx2_start + int(round(frac_c * (num_grains2 - 1 - idx2_start)))
-                    idx2 = min(idx2, num_grains2 - 1)
-                    idx1 = num_grains1 - 1   # não usado em p=1
+                    if use_natural:
+                        # Grão relativo dentro da Fase C
+                        i_c = i - (N - N_c)          # posição dentro da fase C (0-based)
+                        # Retoma do grão do Áudio 2 onde a Fase B terminou
+                        idx2_b_end = min(int(round(marker_end * (num_grains2 - 1))),
+                                         num_grains2 - 1)
+                        idx2 = min(idx2_b_end + i_c, num_grains2 - 1)
+                    else:
+                        span_c = 1.0 - marker_end
+                        frac_c = ((pos - marker_end) / span_c) if span_c > 0 else 1.0
+                        idx2_start = int(round(marker_end * (num_grains2 - 1)))
+                        idx2 = idx2_start + int(round(frac_c * (num_grains2 - 1 - idx2_start)))
+                        idx2 = min(idx2, num_grains2 - 1)
+                    idx1 = num_grains1 - 1   # não usado com p=1
 
                 else:
-                    # Fase B: interpolação progressiva
-                    # p vai 0→1 dentro da janela
+                    # ── FASE B: interpolação progressiva ────────────────────
                     p = (pos - marker_start) / (marker_end - marker_start)
-                    # Áudio 1: continua de marker_start até o fim (grão final)
+                    # Áudio 1: continua de onde a Fase A parou até o último grão
                     idx1_start = int(round(marker_start * (num_grains1 - 1)))
                     idx1 = idx1_start + int(round(p * (num_grains1 - 1 - idx1_start)))
                     idx1 = min(idx1, num_grains1 - 1)
-                    # Áudio 2: começa do início e vai até marker_end
+                    # Áudio 2: do início até marker_end
                     idx2_end = int(round(marker_end * (num_grains2 - 1)))
                     idx2 = int(round(p * idx2_end))
                     idx2 = min(idx2, num_grains2 - 1)
@@ -1675,7 +1728,6 @@ class AudioInterpolatorApp:
 
                 # ── 3. Síntese do grão interpolado ─────────────────────────
                 n_total  = self.num_partials
-                t = np.linspace(0, self.grain_duration / 1000, grain_samples, endpoint=False)
                 grain_out = np.zeros(grain_samples)
 
                 if self.spectral_blend_mode == "selecao":
@@ -3385,7 +3437,8 @@ class AudioInterpolatorApp:
         if "Espectral" in self.interpolation_mode:
             dur_tag   = "S" if self.spectral_duration_mode == "soma" else "M"
             blend_tag = "A" if self.spectral_blend_mode == "amplitude" else "Sel"
-            title_parts.append(f"EP-{dur_tag}{blend_tag}")
+            phase_tag = "P" if self.spectral_phase_mode == "proporcional" else "N"
+            title_parts.append(f"EP-{dur_tag}{blend_tag}{phase_tag}")
 
         # Adiciona quantidade de parciais
         title_parts.append(f"{self.num_partials}")
