@@ -1223,15 +1223,18 @@ class AudioInterpolatorApp:
             num_grains1 = len(grains1)
             num_grains2 = len(grains2)
 
+            # total_grains baseado no áudio mais longo, para não cortar o final
+            max_grains = max(num_grains1, num_grains2)
+
             # Para qualquer fator (incluindo 0% e 100%)
-            grains_from_1 = int(num_grains1 * (1 - alpha))
-            grains_from_2 = int(num_grains2 * alpha)
+            grains_from_1 = int(max_grains * (1 - alpha))
+            grains_from_2 = int(max_grains * alpha)
 
             # Ajusta casos extremos
-            if alpha == 0.0:  # 100% áudio 1
+            if alpha == 0.0:
                 grains_from_1 = num_grains1
                 grains_from_2 = 0
-            elif alpha == 1.0:  # 100% áudio 2
+            elif alpha == 1.0:
                 grains_from_1 = 0
                 grains_from_2 = num_grains2
 
@@ -1243,11 +1246,10 @@ class AudioInterpolatorApp:
             gain2 = track2.gain  # gain linear do Áudio 2
 
             if grains_from_1 > 0:
-                step1 = max(1, num_grains1 // grains_from_1)
-                indices1 = list(range(0, num_grains1, step1))[:grains_from_1]
+                # Índices cíclicos caso grains_from_1 > num_grains1
+                indices1 = [i % num_grains1 for i in range(grains_from_1)]
                 selected_grains1 = [grains1[i] * gain1 for i in indices1]
                 selected_freqs1 = [track1.grain_frequencies[i] for i in indices1]
-                # Magnitudes também escaladas pelo ganho para que os grãos de conexão respeitem o ganho
                 selected_mags1 = [track1.grain_magnitudes[i] * gain1 for i in indices1]
                 selected_phases1 = [track1.grain_phases[i] for i in indices1]
                 selected_indices1 = indices1
@@ -1259,8 +1261,8 @@ class AudioInterpolatorApp:
                 selected_indices1 = []
 
             if grains_from_2 > 0:
-                step2 = max(1, num_grains2 // grains_from_2)
-                indices2 = list(range(0, num_grains2, step2))[:grains_from_2]
+                # Índices cíclicos caso grains_from_2 > num_grains2
+                indices2 = [i % num_grains2 for i in range(grains_from_2)]
                 selected_grains2 = [grains2[i] * gain2 for i in indices2]
                 selected_freqs2 = [track2.grain_frequencies[i] for i in indices2]
                 selected_mags2 = [track2.grain_magnitudes[i] * gain2 for i in indices2]
@@ -1444,7 +1446,13 @@ class AudioInterpolatorApp:
             interpolated = np.zeros(total_duration_samples)
 
             # Envelopes para diferentes tipos de grãos
-            normal_envelope = self.grain_processor.create_tukey_envelope(normal_grain_length, alpha=0.4)
+            normal_envelope = self.grain_processor.create_tukey_envelope(normal_grain_length, alpha=0.5)
+
+            # ── Alvo de RMS para normalização por grão ─────────────────────
+            all_selected_cg = selected_grains1 + selected_grains2
+            rms_values_cg   = [np.sqrt(np.mean(g ** 2)) for g in all_selected_cg if len(g) > 0]
+            target_rms_cg   = float(np.mean(rms_values_cg)) if rms_values_cg else 0.05
+            target_rms_cg   = max(target_rms_cg, NOISE_FLOOR)
 
             # Para crossfade linear
             fade_in = np.linspace(0, 1, crossfade_samples)
@@ -1468,6 +1476,11 @@ class AudioInterpolatorApp:
                             grain = padded
                         else:
                             grain = grain[:len(normal_envelope)]
+
+                    # Normaliza RMS antes do overlap-add
+                    rms_g = np.sqrt(np.mean(grain ** 2))
+                    if rms_g > NOISE_FLOOR:
+                        grain = grain * (target_rms_cg / rms_g)
 
                     # Aplica envelope
                     enveloped_grain = grain * normal_envelope
@@ -1882,15 +1895,18 @@ class AudioInterpolatorApp:
             num_grains1 = len(grains1)
             num_grains2 = len(grains2)
 
+            # total_grains baseado no áudio mais longo, para não cortar o final
+            max_grains = max(num_grains1, num_grains2)
+
             # Para qualquer fator (incluindo 0% e 100%)
-            grains_from_1 = int(num_grains1 * (1 - alpha))
-            grains_from_2 = int(num_grains2 * alpha)
+            grains_from_1 = int(max_grains * (1 - alpha))
+            grains_from_2 = int(max_grains * alpha)
 
             # Ajusta casos extremos
-            if alpha == 0.0:  # 100% áudio 1
+            if alpha == 0.0:
                 grains_from_1 = num_grains1
                 grains_from_2 = 0
-            elif alpha == 1.0:  # 100% áudio 2
+            elif alpha == 1.0:
                 grains_from_1 = 0
                 grains_from_2 = num_grains2
 
@@ -1902,15 +1918,15 @@ class AudioInterpolatorApp:
             gain2 = track2.gain  # gain linear do Áudio 2
 
             if grains_from_1 > 0:
-                step1 = max(1, num_grains1 // grains_from_1)
-                indices1 = list(range(0, num_grains1, step1))[:grains_from_1]
+                # Usa índices cíclicos se grains_from_1 > num_grains1
+                indices1 = [i % num_grains1 for i in range(grains_from_1)]
                 selected_grains1 = [grains1[i] * gain1 for i in indices1]
             else:
                 selected_grains1 = []
 
             if grains_from_2 > 0:
-                step2 = max(1, num_grains2 // grains_from_2)
-                indices2 = list(range(0, num_grains2, step2))[:grains_from_2]
+                # Usa índices cíclicos se grains_from_2 > num_grains2
+                indices2 = [i % num_grains2 for i in range(grains_from_2)]
                 selected_grains2 = [grains2[i] * gain2 for i in indices2]
             else:
                 selected_grains2 = []
@@ -1999,6 +2015,14 @@ class AudioInterpolatorApp:
                     if i != j:
                         sequence[i], sequence[j] = sequence[j], sequence[i]
 
+            # ── Alvo de RMS para normalização por grão ─────────────────────
+            # Calculado como média dos RMS de todos os grãos selecionados,
+            # para preservar o nível médio da interpolação.
+            all_selected = selected_grains1 + selected_grains2
+            rms_values = [np.sqrt(np.mean(g ** 2)) for g in all_selected if len(g) > 0]
+            target_rms = float(np.mean(rms_values)) if rms_values else 0.05
+            target_rms = max(target_rms, NOISE_FLOOR)
+
             # Reconstrói áudio
             grain_length = standard_grain_length
             hop_size = int(grain_length * (1 - self.overlap))
@@ -2013,8 +2037,8 @@ class AudioInterpolatorApp:
 
             interpolated = np.zeros(total_length)
 
-            # Cria envelope
-            envelope = self.grain_processor.create_tukey_envelope(grain_length, alpha=0.4)
+            # Envelope Tukey com alpha=0.5 para suavizar transições
+            envelope = self.grain_processor.create_tukey_envelope(grain_length, alpha=0.5)
 
             for i, grain in enumerate(sequence):
                 start = i * hop_size
@@ -2023,9 +2047,8 @@ class AudioInterpolatorApp:
                 if start >= total_length:
                     break
 
-                # Verifica tamanho
+                # Ajusta tamanho do grão ao envelope
                 if len(grain) != len(envelope):
-                    # Ajusta o grão para o tamanho do envelope
                     if len(grain) < len(envelope):
                         padded = np.zeros(len(envelope))
                         padded[:len(grain)] = grain
@@ -2033,11 +2056,16 @@ class AudioInterpolatorApp:
                     else:
                         grain = grain[:len(envelope)]
 
+                # Normaliza RMS do grão antes do overlap-add
+                rms = np.sqrt(np.mean(grain ** 2))
+                if rms > NOISE_FLOOR:
+                    grain = grain * (target_rms / rms)
+
                 enveloped_grain = grain * envelope
 
                 if end > total_length:
                     end = total_length
-                    enveloped_grain = enveloped_grain[:end-start]
+                    enveloped_grain = enveloped_grain[:end - start]
 
                 interpolated[start:end] += enveloped_grain
 
@@ -3413,41 +3441,59 @@ class AudioInterpolatorApp:
         self.canvas.draw()
 
     def get_interpolation_title(self):
-        """Gera título formatado para a interpolação conforme solicitado"""
+        """Gera título para o painel do gráfico (inclui duração)"""
         if self.interpolated_audio is None:
             return "Áudio Interpolado"
 
-        sample_rate = self.audio_tracks[0].sample_rate
-        total_duration = len(self.interpolated_audio) / sample_rate
+        sample_rate     = self.audio_tracks[0].sample_rate
+        total_duration  = len(self.interpolated_audio) / sample_rate
+        title           = self._build_interp_name(include_duration=True)
+        return f"{title}  [{total_duration:.1f}s]"
 
-        # Base do título
-        title_parts = [f"{self.interpolation_factor:.0f}"]
+    def _build_interp_name(self, include_duration=False):
+        """
+        Monta o nome base da interpolação (usado no título do gráfico
+        e como nome de arquivo).
 
-        # Adiciona aleatoriedade
-        title_parts.append(f"{self.randomness_factor:.0f}")
+        Estrutura:
+          Modo + Configurações Gerais + Configurações Específicas [+ duração]
 
-        # Adiciona duração do grão
-        title_parts.append(f"{self.grain_duration}")
+        GS  → GS_G{grão}ms_O{overlap}p_P{parciais}_I{interp}p_A{random}p
+        CG  → CG_G{grão}ms_O{overlap}p_P{parciais}_I{interp}p_A{random}p_C{conexão}ms
+        EP  → EP_G{grão}ms_O{overlap}p_P{parciais}_{dur}{blend}{fases}_J{start}p{end}p
+        """
+        g  = self.grain_duration
+        ov = int(round(self.overlap * 100))
+        p  = self.num_partials
 
-        # Se modo conexão, adiciona duração do grão de conexão
-        if "Conexão" in self.interpolation_mode:
-            title_parts.append(f"{self.connection_grain_duration}")
-
-        # Se modo espectral progressivo, adiciona sufixo das opções
         if "Espectral" in self.interpolation_mode:
-            dur_tag   = "S" if self.spectral_duration_mode == "soma" else "M"
-            blend_tag = "A" if self.spectral_blend_mode == "amplitude" else "Sel"
-            phase_tag = "P" if self.spectral_phase_mode == "proporcional" else "N"
-            title_parts.append(f"EP-{dur_tag}{blend_tag}{phase_tag}")
+            mode    = "EP"
+            dur_tag   = "S" if self.spectral_duration_mode == "soma"         else "M"
+            blend_tag = "A" if self.spectral_blend_mode    == "amplitude"    else "Sel"
+            phase_tag = "P" if self.spectral_phase_mode    == "proporcional" else "N"
+            js = int(round(self.spectral_interp_start * 100))
+            je = int(round(self.spectral_interp_end   * 100))
+            specific = f"_{dur_tag}{blend_tag}{phase_tag}_J{js}p{je}p"
+        elif "Conexão" in self.interpolation_mode:
+            mode     = "CG"
+            i_pct    = int(round(self.interpolation_factor))
+            a_pct    = int(round(self.randomness_factor))
+            c_ms     = self.connection_grain_duration
+            specific = f"_I{i_pct}p_A{a_pct}p_C{c_ms}ms"
+        else:
+            mode     = "GS"
+            i_pct    = int(round(self.interpolation_factor))
+            a_pct    = int(round(self.randomness_factor))
+            specific = f"_I{i_pct}p_A{a_pct}p"
 
-        # Adiciona quantidade de parciais
-        title_parts.append(f"{self.num_partials}")
+        name = f"{mode}_G{g}ms_O{ov}p_P{p}{specific}"
 
-        # Adiciona duração total
-        title_parts.append(f"{total_duration:.1f}s")
+        if include_duration and self.interpolated_audio is not None:
+            sr  = self.audio_tracks[0].sample_rate
+            dur = len(self.interpolated_audio) / sr
+            name += f"_D{dur:.1f}s"
 
-        # Junta tudo com "-"
-        return "Variação " + "-".join(title_parts)
+        return name
 
     def play_interpolation(self):
         """Reproduz áudio interpolado"""
@@ -3470,9 +3516,9 @@ class AudioInterpolatorApp:
             messagebox.showwarning("Aviso", "Gere uma interpolação primeiro!")
             return
 
-        # Usa o título formatado como base para o nome do arquivo
-        title = self.get_interpolation_title().replace("Áudio Interpolado: ", "")
-        default_name = f"interpolacao_{title.replace('-', '_')}.wav"
+        # Usa o nome estruturado (sem duração) como base para o arquivo
+        base_name  = self._build_interp_name(include_duration=False)
+        default_name = f"{base_name}.wav"
 
         file_path = filedialog.asksaveasfilename(
             defaultextension=".wav",
