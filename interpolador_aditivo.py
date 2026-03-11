@@ -1446,13 +1446,14 @@ class AudioInterpolatorApp:
             interpolated = np.zeros(total_duration_samples)
 
             # Envelopes para diferentes tipos de grãos
-            normal_envelope = self.grain_processor.create_tukey_envelope(normal_grain_length, alpha=0.5)
+            normal_envelope = self.grain_processor.create_tukey_envelope(normal_grain_length, alpha=0.4)
 
-            # ── Alvo de RMS para normalização por grão ─────────────────────
-            all_selected_cg = selected_grains1 + selected_grains2
-            rms_values_cg   = [np.sqrt(np.mean(g ** 2)) for g in all_selected_cg if len(g) > 0]
-            target_rms_cg   = float(np.mean(rms_values_cg)) if rms_values_cg else 0.05
-            target_rms_cg   = max(target_rms_cg, NOISE_FLOOR)
+            # Crossfade para grãos normais em transição de fonte (mesmo esquema do modo GS)
+            sr_cg     = track1.sample_rate
+            cf_samples_cg = int(0.005 * sr_cg)
+            cf_samples_cg = max(10, min(cf_samples_cg, normal_hop_size // 2))
+            fade_out_cg   = np.linspace(1.0, 0.0, cf_samples_cg)
+            fade_in_cg    = np.linspace(0.0, 1.0, cf_samples_cg)
 
             # Para crossfade linear
             fade_in = np.linspace(0, 1, crossfade_samples)
@@ -1460,6 +1461,7 @@ class AudioInterpolatorApp:
 
             # Posição atual no áudio
             current_position = 0
+            prev_cg_source = None   # rastreia fonte do grão normal anterior
 
             # Processa a sequência FINAL mantendo a ordem correta
             for i in range(len(final_sequence)):
@@ -1477,11 +1479,6 @@ class AudioInterpolatorApp:
                         else:
                             grain = grain[:len(normal_envelope)]
 
-                    # Normaliza RMS antes do overlap-add
-                    rms_g = np.sqrt(np.mean(grain ** 2))
-                    if rms_g > NOISE_FLOOR:
-                        grain = grain * (target_rms_cg / rms_g)
-
                     # Aplica envelope
                     enveloped_grain = grain * normal_envelope
                     grain_length = len(enveloped_grain)
@@ -1492,7 +1489,17 @@ class AudioInterpolatorApp:
 
                     if next_is_connection:
                         # Este grão normal é seguido por um grão de conexão
-                        # Aplica fade-out nos últimos crossfade_samples
+
+                        # ── Crossfade adaptativo se a fonte mudou ──────────
+                        if prev_cg_source is not None and track_id != prev_cg_source:
+                            n_cf = cf_samples_cg
+                            if current_position > 0:
+                                ov_start = current_position
+                                ov_end   = min(ov_start + n_cf, len(interpolated))
+                                n = ov_end - ov_start
+                                if n > 0:
+                                    interpolated[ov_start:ov_end] *= fade_out_cg[:n]
+                                    enveloped_grain[:n] *= fade_in_cg[:n]
 
                         # 1. Adiciona o grão normal inteiro primeiro
                         end_pos = current_position + grain_length
@@ -1503,11 +1510,10 @@ class AudioInterpolatorApp:
                             if available > 0:
                                 interpolated[current_position:] += enveloped_grain[:available]
 
-                        # 2. Aplica fade-out nos últimos crossfade_samples
+                        # 2. Aplica fade-out nos últimos crossfade_samples (antes do grão de conexão)
                         if grain_length >= crossfade_samples:
                             fade_out_start = current_position + grain_length - crossfade_samples
                             if fade_out_start >= 0 and fade_out_start + crossfade_samples <= len(interpolated):
-                                # Multiplica a região de fade-out pelo envelope de fade-out
                                 interpolated[fade_out_start:fade_out_start + crossfade_samples] *= fade_out
 
                         # 3. Avança pelo hop size (não pela duração completa)
@@ -1515,6 +1521,18 @@ class AudioInterpolatorApp:
 
                     else:
                         # Grão normal sem conexão seguinte
+
+                        # ── Crossfade adaptativo se a fonte mudou ──────────
+                        if prev_cg_source is not None and track_id != prev_cg_source:
+                            n_cf = cf_samples_cg
+                            if current_position > 0:
+                                ov_start = current_position
+                                ov_end   = min(ov_start + n_cf, len(interpolated))
+                                n = ov_end - ov_start
+                                if n > 0:
+                                    interpolated[ov_start:ov_end] *= fade_out_cg[:n]
+                                    enveloped_grain[:n] *= fade_in_cg[:n]
+
                         # Adiciona normalmente
                         end_pos = current_position + grain_length
                         if end_pos <= len(interpolated):
@@ -1529,6 +1547,8 @@ class AudioInterpolatorApp:
                             current_position += normal_hop_size
                         else:
                             current_position += grain_length
+
+                    prev_cg_source = track_id   # atualiza fonte do grão anterior
 
                 else:  # grain_type == 'connection'
                     # Grão de conexão
@@ -1946,68 +1966,49 @@ class AudioInterpolatorApp:
             length_counts = Counter(all_grain_lengths)
             standard_grain_length = length_counts.most_common(1)[0][0]
 
-            # Cria sequência de grãos
-            sequence = []
+            # Cria sequência de grãos como (grain, source_id) para rastrear origem
+            sequence = []   # lista de (grain, source_id)  — source_id: 0=áudio1, 1=áudio2
             idx1 = 0
             idx2 = 0
 
             # Determina qual áudio tem mais grãos selecionados
             if grains_from_1 >= grains_from_2:
-                # Mais grãos do áudio 1
                 if grains_from_2 > 0:
                     step = max(1, grains_from_1 // grains_from_2)
-
                     for i in range(total_grains):
                         if i % (step + 1) < step and idx1 < len(selected_grains1):
-                            # Pega grão do áudio 1
-                            grain = selected_grains1[idx1]
-                            sequence.append(grain)
+                            sequence.append((selected_grains1[idx1], 0))
                             idx1 += 1
                         elif idx2 < len(selected_grains2):
-                            # Pega grão do áudio 2
-                            grain = selected_grains2[idx2]
-                            sequence.append(grain)
+                            sequence.append((selected_grains2[idx2], 1))
                             idx2 += 1
                         elif idx1 < len(selected_grains1):
-                            # Se acabou áudio 2, pega do áudio 1
-                            grain = selected_grains1[idx1]
-                            sequence.append(grain)
+                            sequence.append((selected_grains1[idx1], 0))
                             idx1 += 1
                 else:
-                    # Só tem áudio 1
                     for grain in selected_grains1:
-                        sequence.append(grain)
+                        sequence.append((grain, 0))
             else:
-                # Mais grãos do áudio 2
                 if grains_from_1 > 0:
                     step = max(1, grains_from_2 // grains_from_1)
-
                     for i in range(total_grains):
                         if i % (step + 1) < step and idx2 < len(selected_grains2):
-                            # Pega grão do áudio 2
-                            grain = selected_grains2[idx2]
-                            sequence.append(grain)
+                            sequence.append((selected_grains2[idx2], 1))
                             idx2 += 1
                         elif idx1 < len(selected_grains1):
-                            # Pega grão do áudio 1
-                            grain = selected_grains1[idx1]
-                            sequence.append(grain)
+                            sequence.append((selected_grains1[idx1], 0))
                             idx1 += 1
                         elif idx2 < len(selected_grains2):
-                            # Se acabou áudio 1, pega do áudio 2
-                            grain = selected_grains2[idx2]
-                            sequence.append(grain)
+                            sequence.append((selected_grains2[idx2], 1))
                             idx2 += 1
                 else:
-                    # Só tem áudio 2
                     for grain in selected_grains2:
-                        sequence.append(grain)
+                        sequence.append((grain, 1))
 
-            # Verifica se temos grãos suficientes
             if len(sequence) == 0:
                 raise ValueError("Nenhum grão válido após padronização!")
 
-            # Aplica aleatoriedade (se configurada)
+            # Aplica aleatoriedade (se configurada) — troca pares (grain, source_id)
             if self.randomness_factor > 0 and len(sequence) > 1:
                 num_swaps = int(len(sequence) * (self.randomness_factor / 200.0))
                 for _ in range(num_swaps):
@@ -2015,19 +2016,11 @@ class AudioInterpolatorApp:
                     if i != j:
                         sequence[i], sequence[j] = sequence[j], sequence[i]
 
-            # ── Alvo de RMS para normalização por grão ─────────────────────
-            # Calculado como média dos RMS de todos os grãos selecionados,
-            # para preservar o nível médio da interpolação.
-            all_selected = selected_grains1 + selected_grains2
-            rms_values = [np.sqrt(np.mean(g ** 2)) for g in all_selected if len(g) > 0]
-            target_rms = float(np.mean(rms_values)) if rms_values else 0.05
-            target_rms = max(target_rms, NOISE_FLOOR)
-
             # Reconstrói áudio
             grain_length = standard_grain_length
             hop_size = int(grain_length * (1 - self.overlap))
 
-            # CORREÇÃO: Para 0% ou 100%, usa o comprimento original
+            # Duração total
             if alpha == 0.0 and track1.original is not None:
                 total_length = len(track1.original)
             elif alpha == 1.0 and track2.original is not None:
@@ -2037,29 +2030,33 @@ class AudioInterpolatorApp:
 
             interpolated = np.zeros(total_length)
 
-            # Envelope Tukey com alpha=0.5 para suavizar transições
-            envelope = self.grain_processor.create_tukey_envelope(grain_length, alpha=0.5)
+            # Envelope Tukey alpha=0.4
+            envelope = self.grain_processor.create_tukey_envelope(grain_length, alpha=0.4)
 
-            for i, grain in enumerate(sequence):
+            # Crossfade adaptativo: aplicado na região de overlap quando a fonte muda
+            # N amostras = 5 ms, limitado a metade do hop_size
+            cf_samples = int(0.005 * track1.sample_rate)
+            cf_samples = max(10, min(cf_samples, hop_size // 2))
+            fade_out_cf = np.linspace(1.0, 0.0, cf_samples)
+            fade_in_cf  = np.linspace(0.0, 1.0, cf_samples)
+
+            prev_source = None   # rastreia fonte do grão anterior
+
+            for i, (grain, src_id) in enumerate(sequence):
                 start = i * hop_size
-                end = start + grain_length
+                end   = start + grain_length
 
                 if start >= total_length:
                     break
 
                 # Ajusta tamanho do grão ao envelope
-                if len(grain) != len(envelope):
-                    if len(grain) < len(envelope):
-                        padded = np.zeros(len(envelope))
+                if len(grain) != grain_length:
+                    if len(grain) < grain_length:
+                        padded = np.zeros(grain_length)
                         padded[:len(grain)] = grain
                         grain = padded
                     else:
-                        grain = grain[:len(envelope)]
-
-                # Normaliza RMS do grão antes do overlap-add
-                rms = np.sqrt(np.mean(grain ** 2))
-                if rms > NOISE_FLOOR:
-                    grain = grain * (target_rms / rms)
+                        grain = grain[:grain_length]
 
                 enveloped_grain = grain * envelope
 
@@ -2067,7 +2064,21 @@ class AudioInterpolatorApp:
                     end = total_length
                     enveloped_grain = enveloped_grain[:end - start]
 
+                # ── Crossfade na junção entre fontes diferentes ────────────
+                # Quando a fonte muda, suaviza a região de overlap já no buffer
+                # (fade-out no final do acumulado) e aplica fade-in no novo grão
+                if prev_source is not None and src_id != prev_source and start > 0:
+                    overlap_start = start
+                    overlap_end   = min(start + cf_samples, total_length)
+                    n_cf = overlap_end - overlap_start
+                    if n_cf > 0:
+                        # Fade-out sobre o que já está no buffer (final do grão anterior)
+                        interpolated[overlap_start:overlap_end] *= fade_out_cf[:n_cf]
+                        # Fade-in no novo grão antes de somar
+                        enveloped_grain[:n_cf] *= fade_in_cf[:n_cf]
+
                 interpolated[start:end] += enveloped_grain
+                prev_source = src_id
 
                 # Atualiza progresso
                 if len(sequence) > 0 and i % max(1, len(sequence) // 10) == 0:
