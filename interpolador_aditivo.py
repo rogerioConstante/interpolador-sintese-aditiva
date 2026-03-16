@@ -1703,63 +1703,42 @@ class AudioInterpolatorApp:
             if marker_end <= marker_start:
                 marker_end = min(marker_start + 0.02, 1.0)
 
-            # Número de slots em cada fase
-            N_a = int(round(marker_start * (N - 1)))   # slots da Fase A
-            N_c = N - 1 - int(round(marker_end * (N - 1)))  # slots da Fase C
-            N_b = N - N_a - N_c                         # slots da Fase B
-            N_b = max(N_b, 1)
-
             # Pré-computa o vetor t (igual para todos os grãos)
             t = np.linspace(0, self.grain_duration / 1000, grain_samples, endpoint=False)
 
+            # ── Trajetória unificada de índices ────────────────────────────
+            # idx1 e idx2 crescem monotonicamente de 0 ao máximo ao longo de
+            # todos os N slots, independentemente das fases.
+            # Isso garante continuidade nas junções A→B e B→C.
+            #
+            # Modo Natural:  cada áudio percorre seus grãos na velocidade real
+            #   (1 slot = 1 grão); se o áudio for mais curto que N, trava no
+            #   último grão.
+            # Modo Proporcional: cada áudio é esticado/comprimido para cobrir
+            #   exatamente N slots (remapeamento linear).
             use_natural = (self.spectral_phase_mode == "natural")
 
-            for i in range(N):
-                pos = i / (N - 1)   # posição 0.0→1.0 no áudio total
-
-                # ── Calcula idx1, idx2 e p conforme a fase ─────────────────
-                if pos <= marker_start:
-                    # ── FASE A: só Áudio 1 ──────────────────────────────────
-                    p = 0.0
-                    if use_natural:
-                        # Reprodução 1-para-1: grão i → grão i do Áudio 1
-                        idx1 = min(i, num_grains1 - 1)
-                    else:
-                        # Proporcional: escala os N_a slots sobre num_grains1
-                        frac_a = (i / N_a) if N_a > 0 else 0.0
-                        idx1 = int(round(frac_a * (num_grains1 - 1)))
-                        idx1 = min(idx1, num_grains1 - 1)
-                    idx2 = 0   # não usado com p=0
-
-                elif pos >= marker_end:
-                    # ── FASE C: só Áudio 2 ──────────────────────────────────
-                    p = 1.0
-                    if use_natural:
-                        # Grão relativo dentro da Fase C
-                        i_c = i - (N - N_c)          # posição dentro da fase C (0-based)
-                        # Retoma do grão do Áudio 2 onde a Fase B terminou
-                        idx2_b_end = min(int(round(marker_end * (num_grains2 - 1))),
-                                         num_grains2 - 1)
-                        idx2 = min(idx2_b_end + i_c, num_grains2 - 1)
-                    else:
-                        span_c = 1.0 - marker_end
-                        frac_c = ((pos - marker_end) / span_c) if span_c > 0 else 1.0
-                        idx2_start = int(round(marker_end * (num_grains2 - 1)))
-                        idx2 = idx2_start + int(round(frac_c * (num_grains2 - 1 - idx2_start)))
-                        idx2 = min(idx2, num_grains2 - 1)
-                    idx1 = num_grains1 - 1   # não usado com p=1
-
+            def idx_for(i, num_grains, mode_natural):
+                if mode_natural:
+                    return min(i, num_grains - 1)
                 else:
-                    # ── FASE B: interpolação progressiva ────────────────────
+                    return int(round(i / (N - 1) * (num_grains - 1))) if N > 1 else 0
+
+            for i in range(N):
+                pos = i / (N - 1) if N > 1 else 0.0   # posição 0.0→1.0
+
+                # Índices contínuos — mesma fórmula nas três fases
+                idx1 = idx_for(i, num_grains1, use_natural)
+                idx2 = idx_for(i, num_grains2, use_natural)
+
+                # ── p: mistura espectral — varia só na Fase B ──────────────
+                if pos <= marker_start:
+                    p = 0.0   # Fase A: 100 % Áudio 1
+                elif pos >= marker_end:
+                    p = 1.0   # Fase C: 100 % Áudio 2
+                else:
+                    # Fase B: transição suave 0→1
                     p = (pos - marker_start) / (marker_end - marker_start)
-                    # Áudio 1: continua de onde a Fase A parou até o último grão
-                    idx1_start = int(round(marker_start * (num_grains1 - 1)))
-                    idx1 = idx1_start + int(round(p * (num_grains1 - 1 - idx1_start)))
-                    idx1 = min(idx1, num_grains1 - 1)
-                    # Áudio 2: do início até marker_end
-                    idx2_end = int(round(marker_end * (num_grains2 - 1)))
-                    idx2 = int(round(p * idx2_end))
-                    idx2 = min(idx2, num_grains2 - 1)
 
                 freq1  = track1.grain_frequencies[idx1]
                 mag1   = track1.grain_magnitudes[idx1] * gain1
