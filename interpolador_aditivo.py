@@ -1706,39 +1706,69 @@ class AudioInterpolatorApp:
             # Pré-computa o vetor t (igual para todos os grãos)
             t = np.linspace(0, self.grain_duration / 1000, grain_samples, endpoint=False)
 
-            # ── Trajetória unificada de índices ────────────────────────────
-            # idx1 e idx2 crescem monotonicamente de 0 ao máximo ao longo de
-            # todos os N slots, independentemente das fases.
-            # Isso garante continuidade nas junções A→B e B→C.
-            #
-            # Modo Natural:  cada áudio percorre seus grãos na velocidade real
-            #   (1 slot = 1 grão); se o áudio for mais curto que N, trava no
-            #   último grão.
-            # Modo Proporcional: cada áudio é esticado/comprimido para cobrir
-            #   exatamente N slots (remapeamento linear).
             use_natural = (self.spectral_phase_mode == "natural")
 
-            def idx_for(i, num_grains, mode_natural):
-                if mode_natural:
-                    return min(i, num_grains - 1)
-                else:
-                    return int(round(i / (N - 1) * (num_grains - 1))) if N > 1 else 0
+            # ── Limites de grão por fase (válidos para ambos os modos) ─────
+            # Fase A usa grãos 0            → g1_a_end   do Áudio 1
+            # Fase B usa grãos g1_a_end     → num_grains1-1 do Áudio 1
+            #           e grãos 0           → g2_b_end   do Áudio 2
+            # Fase C usa grãos g2_b_end     → num_grains2-1 do Áudio 2
+            g1_a_end = int(round(marker_start * (num_grains1 - 1)))
+            g2_b_end = int(round(marker_end   * (num_grains2 - 1)))
+
+            # Slots por fase
+            i_b_start = int(round(marker_start * (N - 1)))   # primeiro slot da Fase B
+            i_b_end   = int(round(marker_end   * (N - 1)))   # primeiro slot da Fase C
+            N_a = i_b_start                                   # nº slots Fase A
+            N_b = max(i_b_end - i_b_start, 1)                # nº slots Fase B
+            N_c = N - i_b_end                                 # nº slots Fase C
+
+            def grain_idx(i_local, n_slots, g_start, g_end, natural_1to1_base=None):
+                """
+                Mapeia o slot local i_local (0-based dentro da fase) para um
+                índice de grão entre g_start e g_end.
+
+                natural_1to1_base: se fornecido, usa i + base diretamente
+                                   (modo Natural "1 slot = 1 grão").
+                Caso contrário faz remapeamento proporcional.
+                """
+                if natural_1to1_base is not None:
+                    return min(natural_1to1_base + i_local, g_end)
+                # proporcional
+                if n_slots <= 1:
+                    return g_start
+                frac = i_local / (n_slots - 1)
+                return g_start + int(round(frac * (g_end - g_start)))
 
             for i in range(N):
                 pos = i / (N - 1) if N > 1 else 0.0   # posição 0.0→1.0
 
-                # Índices contínuos — mesma fórmula nas três fases
-                idx1 = idx_for(i, num_grains1, use_natural)
-                idx2 = idx_for(i, num_grains2, use_natural)
+                # ── p e índices por fase ───────────────────────────────────
+                if i < i_b_start:
+                    # Fase A: 100 % Áudio 1
+                    p    = 0.0
+                    base = 0 if use_natural else None
+                    idx1 = grain_idx(i, N_a, 0, g1_a_end, base)
+                    idx2 = 0   # não usado
 
-                # ── p: mistura espectral — varia só na Fase B ──────────────
-                if pos <= marker_start:
-                    p = 0.0   # Fase A: 100 % Áudio 1
-                elif pos >= marker_end:
-                    p = 1.0   # Fase C: 100 % Áudio 2
+                elif i >= i_b_end:
+                    # Fase C: 100 % Áudio 2
+                    p      = 1.0
+                    i_c    = i - i_b_end          # slot local dentro da Fase C
+                    base   = g2_b_end if use_natural else None
+                    idx2   = grain_idx(i_c, N_c, g2_b_end, num_grains2 - 1, base)
+                    idx1   = num_grains1 - 1       # não usado
+
                 else:
                     # Fase B: transição suave 0→1
-                    p = (pos - marker_start) / (marker_end - marker_start)
+                    i_b   = i - i_b_start          # slot local dentro da Fase B
+                    p     = i_b / (N_b - 1) if N_b > 1 else 0.0
+                    # Áudio 1: de g1_a_end até num_grains1-1
+                    base1 = g1_a_end if use_natural else None
+                    idx1  = grain_idx(i_b, N_b, g1_a_end, num_grains1 - 1, base1)
+                    # Áudio 2: de 0 até g2_b_end
+                    base2 = 0 if use_natural else None
+                    idx2  = grain_idx(i_b, N_b, 0, g2_b_end, base2)
 
                 freq1  = track1.grain_frequencies[idx1]
                 mag1   = track1.grain_magnitudes[idx1] * gain1
