@@ -1639,15 +1639,13 @@ class AudioInterpolatorApp:
                 return g
 
             def add_real_grain(buf, g, pos):
-                """Overlap-add de grão original — preserva amplitude, só aplica envelope."""
-                # Ajusta tamanho se necessário
+                """Overlap-add de grão original — já envelopado, preserva amplitude."""
                 if len(g) < grain_samples:
                     padded = np.zeros(grain_samples)
                     padded[:len(g)] = g
                     g = padded
                 elif len(g) > grain_samples:
                     g = g[:grain_samples]
-                g = g * envelope
                 end = pos + grain_samples
                 if end <= len(buf):
                     buf[pos:end] += g
@@ -1655,10 +1653,7 @@ class AudioInterpolatorApp:
                     buf[pos:] += g[:len(buf) - pos]
 
             def add_synth_grain(buf, g, pos):
-                """Overlap-add de grão re-sintetizado — normaliza RMS para nível fixo."""
-                rms = np.sqrt(np.mean(g**2))
-                if rms > NOISE_FLOOR:
-                    g = g / rms * 0.5
+                """Overlap-add de grão re-sintetizado — sem normalização de RMS."""
                 g *= envelope
                 end = pos + grain_samples
                 if end <= len(buf):
