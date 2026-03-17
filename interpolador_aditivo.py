@@ -1639,7 +1639,7 @@ class AudioInterpolatorApp:
                 return g
 
             def add_real_grain(buf, g, pos):
-                """Overlap-add de grão extraído do sintetizado final."""
+                """Overlap-add de grão com amplitude preservada."""
                 if len(g) < grain_samples:
                     padded = np.zeros(grain_samples)
                     padded[:len(g)] = g
@@ -1665,14 +1665,40 @@ class AudioInterpolatorApp:
                     g = padded
                 return g
 
-            def add_synth_grain(buf, g, pos):
-                """Overlap-add de grão re-sintetizado — aplica envelope Tukey."""
+            def add_synth_grain(buf, g, pos, rms_ref):
+                """Overlap-add de grão re-sintetizado — normaliza para rms_ref."""
                 g = g * envelope
+                rms = np.sqrt(np.mean(g ** 2))
+                if rms > NOISE_FLOOR:
+                    g = g * (rms_ref / rms)
                 end = pos + grain_samples
                 if end <= len(buf):
                     buf[pos:end] += g
                 elif pos < len(buf):
                     buf[pos:] += g[:len(buf) - pos]
+
+            # ── Calcula RMS de referência a partir dos grãos reais ─────────
+            # Amostra até 50 grãos de cada áudio para estimar o RMS médio
+            # de um grão individual no contexto do overlap-add.
+            raw1 = track1.synthesized_raw
+            raw2 = track2.synthesized_raw
+
+            sample_k1 = list(range(0, G1, max(1, G1 // 50)))[:50]
+            sample_k2 = list(range(0, G2, max(1, G2 // 50)))[:50]
+
+            rms_samples = []
+            for k in sample_k1:
+                g = extract_grain(raw1, k)
+                r = np.sqrt(np.mean(g ** 2))
+                if r > NOISE_FLOOR:
+                    rms_samples.append(r)
+            for k in sample_k2:
+                g = extract_grain(raw2, k)
+                r = np.sqrt(np.mean(g ** 2))
+                if r > NOISE_FLOOR:
+                    rms_samples.append(r)
+
+            rms_ref = float(np.mean(rms_samples)) if rms_samples else 0.05
 
             # ── Monta o áudio por fases ────────────────────────────────────
             total_grains  = G1a + G_B + G2c
@@ -1682,7 +1708,6 @@ class AudioInterpolatorApp:
             grain_counter = 0
 
             # FASE A — extraído de synthesized_raw do Áudio 1 (grãos 0..G1a-1)
-            raw1 = track1.synthesized_raw
             for k in range(G1a):
                 g = extract_grain(raw1, k) * gain1
                 add_real_grain(interpolated, g, pos)
@@ -1709,7 +1734,7 @@ class AudioInterpolatorApp:
                     grains2_freq[idx2b],  grains2_mag[idx2b],  grains2_phase[idx2b],
                     p, gain1, gain2
                 )
-                add_synth_grain(interpolated, g, pos)
+                add_synth_grain(interpolated, g, pos, rms_ref)
                 pos += hop_size
                 grain_counter += 1
                 if grain_counter % max(1, total_grains // 20) == 0:
@@ -1717,7 +1742,6 @@ class AudioInterpolatorApp:
                         ('interpolation_progress', grain_counter / total_grains * 100))
 
             # FASE C — extraído de synthesized_raw do Áudio 2 (grãos G2b..G2-1)
-            raw2 = track2.synthesized_raw
             for k in range(G2b, G2):
                 g = extract_grain(raw2, k) * gain2
                 add_real_grain(interpolated, g, pos)
