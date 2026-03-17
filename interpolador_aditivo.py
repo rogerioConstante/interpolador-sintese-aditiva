@@ -740,15 +740,34 @@ class AudioInterpolatorApp:
                 activeforeground=self.colors['fg'],
             ).pack(side=tk.LEFT, padx=(4, 0))
 
-        # Régua visual (somente leitura) das três fases
+        # Régua visual — dois mini-sliders independentes (um por áudio)
         tk.Label(self.spectral_row, text="Distribuição:",
                  font=('Segoe UI', 8), fg=self.colors['accent'],
                  bg=self.colors['card_bg'], anchor='w').pack(fill=tk.X, pady=(4, 0))
-        self.spectral_ruler = tk.Canvas(
-            self.spectral_row, height=28,
+
+        # Régua Áudio 1: [===Fase A===|---Fase B---]
+        ruler1_frame = tk.Frame(self.spectral_row, bg=self.colors['card_bg'])
+        ruler1_frame.pack(fill=tk.X, pady=(1, 1))
+        tk.Label(ruler1_frame, text="Áudio 1:",
+                 font=('Segoe UI', 7), fg=self.colors['primary'],
+                 bg=self.colors['card_bg'], width=8, anchor='w').pack(side=tk.LEFT)
+        self.spectral_ruler1 = tk.Canvas(
+            ruler1_frame, height=14,
             bg=self.colors['card_bg'], highlightthickness=0)
-        self.spectral_ruler.pack(fill=tk.X, pady=(2, 4))
-        self.spectral_ruler.bind("<Configure>", lambda e: self._draw_spectral_ruler())
+        self.spectral_ruler1.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=(1, 1))
+        self.spectral_ruler1.bind("<Configure>", lambda e: self._draw_spectral_ruler())
+
+        # Régua Áudio 2: [---Fase B---|===Fase C===]
+        ruler2_frame = tk.Frame(self.spectral_row, bg=self.colors['card_bg'])
+        ruler2_frame.pack(fill=tk.X, pady=(1, 4))
+        tk.Label(ruler2_frame, text="Áudio 2:",
+                 font=('Segoe UI', 7), fg=self.colors['accent'],
+                 bg=self.colors['card_bg'], width=8, anchor='w').pack(side=tk.LEFT)
+        self.spectral_ruler2 = tk.Canvas(
+            ruler2_frame, height=14,
+            bg=self.colors['card_bg'], highlightthickness=0)
+        self.spectral_ruler2.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=(1, 1))
+        self.spectral_ruler2.bind("<Configure>", lambda e: self._draw_spectral_ruler())
 
         # ===== LINHA 4: GANHO =====
         interp_row4 = tk.Frame(interp_card, bg=self.colors['card_bg'])
@@ -966,54 +985,73 @@ class AudioInterpolatorApp:
         self.spectral_blend_mode = self.spectral_blend_var.get()
 
     def _draw_spectral_ruler(self):
-        """Régua visual somente-leitura das três fases."""
-        if not hasattr(self, 'spectral_ruler'):
-            return
-        c = self.spectral_ruler
-        c.delete("all")
-        W  = c.winfo_width()
-        if W < 10:
-            return
-        H  = 12   # altura da barra
-        TY = 6    # centro vertical
+        """
+        Duas réguas independentes somente-leitura:
+          Áudio 1: [=== Fase A (pct_a%) ===|--- Fase B ---]
+          Áudio 2: [--- Fase B ---|=== Fase C (pct_c%) ===]
+        Cada régua é proporcional ao seu próprio áudio (100%).
+        """
         fs = ('Segoe UI', 7)
+        H  = 12
+        TY = 7
 
-        pct_a = self.spectral_pct_a / 100.0          # fração Fase A
-        pct_c = self.spectral_pct_c / 100.0          # fração Fase C
-        # A régua representa os três segmentos proporcionalmente
-        # A e C mostram as % definidas; B preenche o resto
-        total = pct_a + pct_c
-        if total >= 1.0:
-            pct_a = pct_a / (total + 0.01)
-            pct_c = pct_c / (total + 0.01)
-        pct_b = max(0.0, 1.0 - pct_a - pct_c)
+        def draw_ruler(canvas, pct_colored, colored_left, color_phase,
+                       label_phase, label_b):
+            if not hasattr(self, canvas.__class__.__name__):
+                pass
+            canvas.delete("all")
+            W = canvas.winfo_width()
+            if W < 10:
+                return
+            frac = max(0.0, min(1.0, pct_colored / 100.0))
+            x_split = int(W * frac)
 
-        x_ab = int(W * pct_a)
-        x_bc = int(W * (pct_a + pct_b))
+            if colored_left:
+                # Fase colorida à esquerda, B à direita
+                x_col_lo, x_col_hi = 0, x_split
+                x_b_lo,   x_b_hi   = x_split, W
+            else:
+                # B à esquerda, fase colorida à direita
+                x_b_lo,   x_b_hi   = 0, x_split
+                x_col_lo, x_col_hi = x_split, W
 
-        # Faixa A
-        if x_ab > 0:
-            c.create_rectangle(0, 0, x_ab, H,
-                               fill=self.colors['primary'], outline="")
-        # Faixa B
-        if x_bc > x_ab:
-            c.create_rectangle(x_ab, 0, x_bc, H,
-                               fill=self.colors['interpolation'], outline="")
-        # Faixa C
-        if W > x_bc:
-            c.create_rectangle(x_bc, 0, W, H,
-                               fill=self.colors['accent'], outline="")
+            # Faixa B (interpolação)
+            if x_b_hi > x_b_lo:
+                canvas.create_rectangle(x_b_lo, 0, x_b_hi, H,
+                                        fill=self.colors['interpolation'], outline="")
+            # Faixa colorida (fase A ou C)
+            if x_col_hi > x_col_lo:
+                canvas.create_rectangle(x_col_lo, 0, x_col_hi, H,
+                                        fill=color_phase, outline="")
 
-        # Legendas
-        def label(x0, x1, text, color):
-            cx = (x0 + x1) // 2
-            if x1 - x0 > 20:
-                c.create_text(cx, TY, text=text, fill='white',
-                              font=fs, anchor='center')
+            # Legendas
+            def lbl(x0, x1, text):
+                if x1 - x0 > 18:
+                    canvas.create_text((x0+x1)//2, TY, text=text,
+                                       fill='white', font=fs, anchor='center')
 
-        label(0,    x_ab, f"A {self.spectral_pct_a:.0f}%", self.colors['primary'])
-        label(x_ab, x_bc, "B",                              self.colors['interpolation'])
-        label(x_bc, W,    f"C {self.spectral_pct_c:.0f}%", self.colors['accent'])
+            if colored_left:
+                lbl(x_col_lo, x_col_hi, f"{label_phase} {pct_colored:.0f}%")
+                lbl(x_b_lo,   x_b_hi,   label_b)
+            else:
+                lbl(x_b_lo,   x_b_hi,   label_b)
+                lbl(x_col_lo, x_col_hi, f"{label_phase} {pct_colored:.0f}%")
+
+        if hasattr(self, 'spectral_ruler1'):
+            draw_ruler(self.spectral_ruler1,
+                       pct_colored=self.spectral_pct_a,
+                       colored_left=True,
+                       color_phase=self.colors['primary'],
+                       label_phase="A",
+                       label_b="→ B")
+
+        if hasattr(self, 'spectral_ruler2'):
+            draw_ruler(self.spectral_ruler2,
+                       pct_colored=self.spectral_pct_c,
+                       colored_left=False,
+                       color_phase=self.colors['accent'],
+                       label_phase="C",
+                       label_b="B →")
 
     def on_interpolation_mode_change(self, event=None):
         """Atualiza quando modo de interpolação muda"""
@@ -1600,8 +1638,24 @@ class AudioInterpolatorApp:
                             g += mag_interp[slot] * np.sin(2 * np.pi * f * t_vec + ph)
                 return g
 
-            def add_grain(buf, g, pos):
-                """Overlap-add de um grão no buffer."""
+            def add_real_grain(buf, g, pos):
+                """Overlap-add de grão original — preserva amplitude, só aplica envelope."""
+                # Ajusta tamanho se necessário
+                if len(g) < grain_samples:
+                    padded = np.zeros(grain_samples)
+                    padded[:len(g)] = g
+                    g = padded
+                elif len(g) > grain_samples:
+                    g = g[:grain_samples]
+                g = g * envelope
+                end = pos + grain_samples
+                if end <= len(buf):
+                    buf[pos:end] += g
+                elif pos < len(buf):
+                    buf[pos:] += g[:len(buf) - pos]
+
+            def add_synth_grain(buf, g, pos):
+                """Overlap-add de grão re-sintetizado — normaliza RMS para nível fixo."""
                 rms = np.sqrt(np.mean(g**2))
                 if rms > NOISE_FLOOR:
                     g = g / rms * 0.5
@@ -1613,25 +1667,24 @@ class AudioInterpolatorApp:
                     buf[pos:] += g[:len(buf) - pos]
 
             # ── Monta o áudio por fases ────────────────────────────────────
-            # Estima tamanho total
-            total_grains = G1a + G_B + G2c
+            total_grains  = G1a + G_B + G2c
             total_samples = (total_grains - 1) * hop_size + grain_samples
             interpolated  = np.zeros(total_samples)
             pos           = 0
             grain_counter = 0
 
-            # FASE A — grãos 0..G1a-1 do Áudio 1
+            # FASE A — grãos reais 0..G1a-1 do Áudio 1
+            synth_grains1 = track1.synthesized_grains
             for k in range(G1a):
-                g = synth_grain(grains1_freq[k], grains1_mag[k],
-                                grains1_phase[k], gain1)
-                add_grain(interpolated, g, pos)
+                g = synth_grains1[k] * gain1
+                add_real_grain(interpolated, g, pos)
                 pos += hop_size
                 grain_counter += 1
                 if grain_counter % max(1, total_grains // 20) == 0:
                     self.audio_queue.put(
                         ('interpolation_progress', grain_counter / total_grains * 100))
 
-            # FASE B — mistura progressiva
+            # FASE B — mistura espectral progressiva
             for i_b in range(G_B):
                 p = i_b / (G_B - 1) if G_B > 1 else 0.0
 
@@ -1648,18 +1701,18 @@ class AudioInterpolatorApp:
                     grains2_freq[idx2b],  grains2_mag[idx2b],  grains2_phase[idx2b],
                     p, gain1, gain2
                 )
-                add_grain(interpolated, g, pos)
+                add_synth_grain(interpolated, g, pos)
                 pos += hop_size
                 grain_counter += 1
                 if grain_counter % max(1, total_grains // 20) == 0:
                     self.audio_queue.put(
                         ('interpolation_progress', grain_counter / total_grains * 100))
 
-            # FASE C — grãos G2b..G2-1 do Áudio 2
+            # FASE C — grãos reais G2b..G2-1 do Áudio 2
+            synth_grains2 = track2.synthesized_grains
             for k in range(G2b, G2):
-                g = synth_grain(grains2_freq[k], grains2_mag[k],
-                                grains2_phase[k], gain2)
-                add_grain(interpolated, g, pos)
+                g = synth_grains2[k] * gain2
+                add_real_grain(interpolated, g, pos)
                 pos += hop_size
                 grain_counter += 1
 
