@@ -385,9 +385,9 @@ class AudioInterpolatorApp:
         self.interpolation_gain_linear = 1.0
 
         # Configurações do modo Espectral Progressivo
-        self.spectral_blend_mode   = "selecao"   # "selecao" ou "amplitude"
         self.spectral_pct_a        = 50.0        # % do Áudio 1 usado na Fase A (0–100)
         self.spectral_pct_c        = 50.0        # % do Áudio 2 usado na Fase C (0–100)
+        self.spectral_curve_mode   = "sigmoide"  # "concava" | "convexa" | "sigmoide"
 
         # Criar variáveis de controle
         self.grain_var = tk.IntVar(value=self.grain_duration)
@@ -398,9 +398,9 @@ class AudioInterpolatorApp:
         self.connection_var = tk.IntVar(value=self.connection_grain_duration)
         self.interp_gain_var = tk.DoubleVar(value=self.interpolation_gain_db)
         self.mode_var = tk.StringVar(value=self.interpolation_modes[0])
-        self.spectral_blend_var    = tk.StringVar(value="selecao")
         self.spectral_pct_a_var    = tk.DoubleVar(value=50.0)
         self.spectral_pct_c_var    = tk.DoubleVar(value=50.0)
+        self.spectral_curve_var    = tk.StringVar(value="sigmoide")
         self.dynamic_var = tk.BooleanVar(value=self.dynamic_preservation)
         self.normalize_var = tk.BooleanVar(value=self.normalize_audio)
         
@@ -723,16 +723,18 @@ class AudioInterpolatorApp:
             self.on_spectral_pct_c_change
         )
 
-        # Linha Mistura espectral
-        spectral_blend_frame = tk.Frame(self.spectral_row, bg=self.colors['card_bg'])
-        spectral_blend_frame.pack(fill=tk.X, pady=(2, 2))
-        tk.Label(spectral_blend_frame, text="Mistura:",
+        # Linha Curva de interpolação (substitui Mistura)
+        spectral_curve_frame = tk.Frame(self.spectral_row, bg=self.colors['card_bg'])
+        spectral_curve_frame.pack(fill=tk.X, pady=(2, 2))
+        tk.Label(spectral_curve_frame, text="Curva:",
                  font=('Segoe UI', 8), fg=self.colors['accent'],
                  bg=self.colors['card_bg'], width=9, anchor='w').pack(side=tk.LEFT)
-        for label, value in [("Seleção", "selecao"), ("Amplitude", "amplitude")]:
+        for label, value in [("Côncava", "concava"),
+                              ("Convexa", "convexa"),
+                              ("Sigmoide", "sigmoide")]:
             tk.Radiobutton(
-                spectral_blend_frame, text=label,
-                variable=self.spectral_blend_var, value=value,
+                spectral_curve_frame, text=label,
+                variable=self.spectral_curve_var, value=value,
                 command=self.on_spectral_options_change,
                 font=('Segoe UI', 8), fg=self.colors['fg'],
                 bg=self.colors['card_bg'], selectcolor=self.colors['secondary'],
@@ -981,8 +983,8 @@ class AudioInterpolatorApp:
         self._draw_spectral_ruler()
 
     def on_spectral_options_change(self):
-        """Atualiza opções do modo Espectral Progressivo (mistura)."""
-        self.spectral_blend_mode = self.spectral_blend_var.get()
+        """Atualiza opções do modo Espectral Progressivo (curva de interpolação)."""
+        self.spectral_curve_mode = self.spectral_curve_var.get()
 
     def _draw_spectral_ruler(self):
         """
@@ -1607,98 +1609,72 @@ class AudioInterpolatorApp:
 
             def synth_grain_blend(freq1, mag1, ph1, freq2, mag2, ph2, p, gain1, gain2):
                 """
-                Sintetiza grão de mistura entre dois grãos.
-                Modo Seleção: sorteia sem reposição/sobreposição.
-                Modo Amplitude: lerp de magnitudes.
+                Sintetiza grão de mistura — modo Seleção exclusivo.
+                Sorteia k1=round(n*(1-p)) slots para o Áudio 1 sem reposição;
+                os demais vão para o Áudio 2. Sem sobreposição por construção.
                 """
-                g = np.zeros(grain_samples)
-                n = min(n_partials, len(freq1), len(freq2))
+                g  = np.zeros(grain_samples)
+                n  = min(n_partials, len(freq1), len(freq2))
                 w1 = mag1[:n] * gain1 / (np.max(mag1[:n] * gain1) + 1e-9)
                 w2 = mag2[:n] * gain2 / (np.max(mag2[:n] * gain2) + 1e-9)
-
-                if self.spectral_blend_mode == "selecao":
-                    # Sorteia k slots para o Áudio 1 (complemento vai p/ Áudio 2)
-                    k1 = max(0, min(n, int(round(n * (1 - p)))))
-                    slots_1 = set(random.sample(range(n), k1))
-                    for slot in range(n):
-                        if slot in slots_1:
-                            f, ph, w = freq1[slot], ph1[slot], w1[slot]
-                        else:
-                            f, ph, w = freq2[slot], ph2[slot], w2[slot]
-                        if 20 < f < sr / 2:
-                            g += w * np.sin(2 * np.pi * f * t_vec + ph)
-                else:
-                    # Amplitude: lerp de magnitudes, freq sorteada
-                    mag_interp = (1 - p) * w1 + p * w2
-                    for slot in range(n):
-                        use2 = (random.random() < p)
-                        f    = freq2[slot] if use2 else freq1[slot]
-                        ph   = ph2[slot]   if use2 else ph1[slot]
-                        if 20 < f < sr / 2:
-                            g += mag_interp[slot] * np.sin(2 * np.pi * f * t_vec + ph)
+                k1 = max(0, min(n, int(round(n * (1 - p)))))
+                slots_1 = set(random.sample(range(n), k1))
+                for slot in range(n):
+                    if slot in slots_1:
+                        f, ph, w = freq1[slot], ph1[slot], w1[slot]
+                    else:
+                        f, ph, w = freq2[slot], ph2[slot], w2[slot]
+                    if 20 < f < sr / 2:
+                        g += w * np.sin(2 * np.pi * f * t_vec + ph)
                 return g
 
             def add_real_grain(buf, g, pos):
-                """Overlap-add de grão com amplitude preservada."""
+                """Overlap-add de grão original — preserva amplitude, só aplica envelope."""
+                # Ajusta tamanho se necessário
                 if len(g) < grain_samples:
                     padded = np.zeros(grain_samples)
                     padded[:len(g)] = g
                     g = padded
                 elif len(g) > grain_samples:
                     g = g[:grain_samples]
-                end = pos + grain_samples
-                if end <= len(buf):
-                    buf[pos:end] += g
-                elif pos < len(buf):
-                    buf[pos:] += g[:len(buf) - pos]
-
-            def extract_grain(synth_raw, k):
-                """Extrai o grão k diretamente do áudio sintetizado final."""
-                start = k * hop_size
-                end   = start + grain_samples
-                if start >= len(synth_raw):
-                    return np.zeros(grain_samples)
-                g = synth_raw[start:end].copy()
-                if len(g) < grain_samples:
-                    padded = np.zeros(grain_samples)
-                    padded[:len(g)] = g
-                    g = padded
-                return g
-
-            def add_synth_grain(buf, g, pos, rms_ref):
-                """Overlap-add de grão re-sintetizado — normaliza para rms_ref."""
                 g = g * envelope
-                rms = np.sqrt(np.mean(g ** 2))
-                if rms > NOISE_FLOOR:
-                    g = g * (rms_ref / rms)
                 end = pos + grain_samples
                 if end <= len(buf):
                     buf[pos:end] += g
                 elif pos < len(buf):
                     buf[pos:] += g[:len(buf) - pos]
 
-            # ── Calcula RMS de referência a partir dos grãos reais ─────────
-            # Amostra até 50 grãos de cada áudio para estimar o RMS médio
-            # de um grão individual no contexto do overlap-add.
-            raw1 = track1.synthesized_raw
-            raw2 = track2.synthesized_raw
+            def add_synth_grain(buf, g, pos):
+                """Overlap-add de grão re-sintetizado — normaliza RMS para nível fixo."""
+                rms = np.sqrt(np.mean(g**2))
+                if rms > NOISE_FLOOR:
+                    g = g / rms * 0.5
+                g *= envelope
+                end = pos + grain_samples
+                if end <= len(buf):
+                    buf[pos:end] += g
+                elif pos < len(buf):
+                    buf[pos:] += g[:len(buf) - pos]
 
-            sample_k1 = list(range(0, G1, max(1, G1 // 50)))[:50]
-            sample_k2 = list(range(0, G2, max(1, G2 // 50)))[:50]
-
-            rms_samples = []
-            for k in sample_k1:
-                g = extract_grain(raw1, k)
-                r = np.sqrt(np.mean(g ** 2))
-                if r > NOISE_FLOOR:
-                    rms_samples.append(r)
-            for k in sample_k2:
-                g = extract_grain(raw2, k)
-                r = np.sqrt(np.mean(g ** 2))
-                if r > NOISE_FLOOR:
-                    rms_samples.append(r)
-
-            rms_ref = float(np.mean(rms_samples)) if rms_samples else 0.05
+            # ── Função de curva para p ─────────────────────────────────────
+            def apply_curve(t):
+                """
+                Transforma t (linear 0→1) segundo a curva escolhida.
+                  côncava  → t² — sobe devagar, acelera no final
+                  convexa  → 1-(1-t)² — sobe rápido, desacelera no final
+                  sigmoide → 1/(1+exp(-10*(t-0.5))) normalizada — suave nas bordas
+                """
+                if self.spectral_curve_mode == "concava":
+                    return t ** 2
+                elif self.spectral_curve_mode == "convexa":
+                    return 1.0 - (1.0 - t) ** 2
+                else:  # sigmoide
+                    if t <= 0.0: return 0.0
+                    if t >= 1.0: return 1.0
+                    raw = 1.0 / (1.0 + np.exp(-10.0 * (t - 0.5)))
+                    lo  = 1.0 / (1.0 + np.exp( 5.0))
+                    hi  = 1.0 / (1.0 + np.exp(-5.0))
+                    return (raw - lo) / (hi - lo)
 
             # ── Monta o áudio por fases ────────────────────────────────────
             total_grains  = G1a + G_B + G2c
@@ -1707,9 +1683,10 @@ class AudioInterpolatorApp:
             pos           = 0
             grain_counter = 0
 
-            # FASE A — extraído de synthesized_raw do Áudio 1 (grãos 0..G1a-1)
+            # FASE A — grãos reais 0..G1a-1 do Áudio 1
+            synth_grains1 = track1.synthesized_grains
             for k in range(G1a):
-                g = extract_grain(raw1, k) * gain1
+                g = synth_grains1[k] * gain1
                 add_real_grain(interpolated, g, pos)
                 pos += hop_size
                 grain_counter += 1
@@ -1717,9 +1694,10 @@ class AudioInterpolatorApp:
                     self.audio_queue.put(
                         ('interpolation_progress', grain_counter / total_grains * 100))
 
-            # FASE B — mistura espectral progressiva
+            # FASE B — mistura espectral progressiva com curva não-linear
             for i_b in range(G_B):
-                p = i_b / (G_B - 1) if G_B > 1 else 0.0
+                t_lin = i_b / (G_B - 1) if G_B > 1 else 0.0
+                p     = apply_curve(t_lin)   # probabilidade curvada
 
                 # Índice do grão no Áudio 1 (porção B = grãos G1a..G1-1)
                 idx1b = G1a + i_b if G1b >= G2b else G1a + short_expanded[i_b]
@@ -1734,16 +1712,17 @@ class AudioInterpolatorApp:
                     grains2_freq[idx2b],  grains2_mag[idx2b],  grains2_phase[idx2b],
                     p, gain1, gain2
                 )
-                add_synth_grain(interpolated, g, pos, rms_ref)
+                add_synth_grain(interpolated, g, pos)
                 pos += hop_size
                 grain_counter += 1
                 if grain_counter % max(1, total_grains // 20) == 0:
                     self.audio_queue.put(
                         ('interpolation_progress', grain_counter / total_grains * 100))
 
-            # FASE C — extraído de synthesized_raw do Áudio 2 (grãos G2b..G2-1)
+            # FASE C — grãos reais G2b..G2-1 do Áudio 2
+            synth_grains2 = track2.synthesized_grains
             for k in range(G2b, G2):
-                g = extract_grain(raw2, k) * gain2
+                g = synth_grains2[k] * gain2
                 add_real_grain(interpolated, g, pos)
                 pos += hop_size
                 grain_counter += 1
@@ -3400,10 +3379,11 @@ class AudioInterpolatorApp:
 
         if "Espectral" in self.interpolation_mode:
             mode      = "EP"
-            blend_tag = "A" if self.spectral_blend_mode == "amplitude" else "Sel"
+            curve_tag = {"concava": "Cc", "convexa": "Cx", "sigmoide": "Sg"}.get(
+                         self.spectral_curve_mode, "Sg")
             pa        = int(round(self.spectral_pct_a))
             pc        = int(round(self.spectral_pct_c))
-            specific  = f"_{blend_tag}_A{pa}p_C{pc}p"
+            specific  = f"_{curve_tag}_A{pa}p_C{pc}p"
         elif "Conexão" in self.interpolation_mode:
             mode     = "CG"
             i_pct    = int(round(self.interpolation_factor))
