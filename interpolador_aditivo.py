@@ -1639,7 +1639,7 @@ class AudioInterpolatorApp:
                 return g
 
             def add_real_grain(buf, g, pos):
-                """Overlap-add de grão original — já envelopado, preserva amplitude."""
+                """Overlap-add de grão extraído do sintetizado final."""
                 if len(g) < grain_samples:
                     padded = np.zeros(grain_samples)
                     padded[:len(g)] = g
@@ -1652,9 +1652,22 @@ class AudioInterpolatorApp:
                 elif pos < len(buf):
                     buf[pos:] += g[:len(buf) - pos]
 
+            def extract_grain(synth_raw, k):
+                """Extrai o grão k diretamente do áudio sintetizado final."""
+                start = k * hop_size
+                end   = start + grain_samples
+                if start >= len(synth_raw):
+                    return np.zeros(grain_samples)
+                g = synth_raw[start:end].copy()
+                if len(g) < grain_samples:
+                    padded = np.zeros(grain_samples)
+                    padded[:len(g)] = g
+                    g = padded
+                return g
+
             def add_synth_grain(buf, g, pos):
-                """Overlap-add de grão re-sintetizado — sem normalização de RMS."""
-                g *= envelope
+                """Overlap-add de grão re-sintetizado — aplica envelope Tukey."""
+                g = g * envelope
                 end = pos + grain_samples
                 if end <= len(buf):
                     buf[pos:end] += g
@@ -1668,10 +1681,10 @@ class AudioInterpolatorApp:
             pos           = 0
             grain_counter = 0
 
-            # FASE A — grãos reais 0..G1a-1 do Áudio 1
-            synth_grains1 = track1.synthesized_grains
+            # FASE A — extraído de synthesized_raw do Áudio 1 (grãos 0..G1a-1)
+            raw1 = track1.synthesized_raw
             for k in range(G1a):
-                g = synth_grains1[k] * gain1
+                g = extract_grain(raw1, k) * gain1
                 add_real_grain(interpolated, g, pos)
                 pos += hop_size
                 grain_counter += 1
@@ -1703,10 +1716,10 @@ class AudioInterpolatorApp:
                     self.audio_queue.put(
                         ('interpolation_progress', grain_counter / total_grains * 100))
 
-            # FASE C — grãos reais G2b..G2-1 do Áudio 2
-            synth_grains2 = track2.synthesized_grains
+            # FASE C — extraído de synthesized_raw do Áudio 2 (grãos G2b..G2-1)
+            raw2 = track2.synthesized_raw
             for k in range(G2b, G2):
-                g = synth_grains2[k] * gain2
+                g = extract_grain(raw2, k) * gain2
                 add_real_grain(interpolated, g, pos)
                 pos += hop_size
                 grain_counter += 1
